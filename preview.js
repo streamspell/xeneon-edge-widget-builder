@@ -34,6 +34,16 @@ const MIME_BY_EXT = {
   gif: 'image/gif',
   webp: 'image/webp',
   ico: 'image/x-icon',
+  avif: 'image/avif',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  woff: 'font/woff',
+  woff2: 'font/woff2',
+  ttf: 'font/ttf',
+  otf: 'font/otf',
   txt: 'text/plain; charset=utf-8'
 };
 
@@ -709,7 +719,7 @@ function renderAssetWarnings() {
   const uniquePaths = [...new Set(widgetAssetWarnings.map((item) => item.path).filter(Boolean))];
   const suffix = uniquePaths.length ? ` Missing: ${uniquePaths.join(', ')}` : '';
   assetWarning.hidden = false;
-  assetWarning.textContent = `Widget loaded, but some packaged assets may not have resolved. Check DevTools Network.${suffix}`;
+  assetWarning.textContent = `Some packaged assets could not be resolved:${suffix}`;
 }
 
 function sanitizeDimension(value, fallback) {
@@ -1188,10 +1198,14 @@ function getCurrentLayoutTarget() {
 }
 
 function revokePreviewObjectUrls() {
+  const revokedCount = currentPreviewObjectUrls.length;
   for (const url of currentPreviewObjectUrls) {
     URL.revokeObjectURL(url);
   }
   currentPreviewObjectUrls = [];
+  if (revokedCount) {
+    logPreviewTelemetry('blob URLs revoked', { count: revokedCount });
+  }
 }
 
 function trackPreviewObjectUrl(url) {
@@ -1203,29 +1217,71 @@ function createPreviewObjectUrl(parts, contentType) {
   return trackPreviewObjectUrl(URL.createObjectURL(new Blob(parts, { type: contentType || 'application/octet-stream' })));
 }
 
-function rewriteCssUrls(cssText, cssPath, assetUrls) {
+function createAssetRewriteDiagnostics() {
+  return {
+    htmlRewriteCount: 0,
+    cssRewriteCount: 0,
+    unresolved: []
+  };
+}
+
+function recordUnresolvedAsset(diagnostics, kind, rawUrl, resolvedPath, ownerPath) {
+  if (!diagnostics) return;
+  diagnostics.unresolved.push({
+    kind,
+    url: String(rawUrl || ''),
+    path: resolvedPath || '',
+    owner: ownerPath || ''
+  });
+}
+
+function rewriteCssUrls(cssText, cssPath, assetUrls, diagnostics = null) {
   const baseDir = dirname(cssPath);
   return String(cssText || '').replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (match, quote, rawUrl) => {
     const resolved = resolvePackageUrl(rawUrl, baseDir);
     if (!resolved) return match;
     const assetUrl = assetUrls.get(resolved.path);
-    if (!assetUrl) return match;
+    if (!assetUrl) {
+      recordUnresolvedAsset(diagnostics, 'css', rawUrl, resolved.path, cssPath);
+      return match;
+    }
+    if (diagnostics) diagnostics.cssRewriteCount += 1;
     return `url(${quote || ''}${assetUrl}${resolved.suffix}${quote || ''})`;
   });
 }
 
-function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls) {
+function rewriteElementUrlAttribute(element, attribute, baseDir, assetUrls, diagnostics, ownerPath, options = {}) {
+  const rawUrl = element.getAttribute(attribute);
+  const resolved = resolvePackageUrl(rawUrl, baseDir);
+  if (!resolved) return false;
+
+  const assetUrl = assetUrls.get(resolved.path);
+  if (!assetUrl) {
+    recordUnresolvedAsset(diagnostics, options.kind || 'html', rawUrl, resolved.path, ownerPath);
+    if (options.blockUnresolved) {
+      element.removeAttribute(attribute);
+      element.setAttribute('data-xeneon-blocked-src', String(rawUrl || ''));
+    }
+    return false;
+  }
+
+  element.setAttribute(attribute, `${assetUrl}${resolved.suffix}`);
+  if (diagnostics) diagnostics.htmlRewriteCount += 1;
+  return true;
+}
+
+function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls, diagnostics = null) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(htmlText, 'text/html');
   const baseDir = dirname(layoutPath);
   const urlAttributes = [
-    ['script[src]', 'src'],
     ['link[href]', 'href'],
+    ['script[src]', 'src'],
     ['img[src]', 'src'],
-    ['image[href]', 'href'],
     ['source[src]', 'src'],
     ['video[src]', 'src'],
     ['audio[src]', 'src'],
+    ['image[href]', 'href'],
     ['track[src]', 'src'],
     ['embed[src]', 'src'],
     ['object[data]', 'data']
@@ -1233,10 +1289,26 @@ function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls) {
 
   for (const [selector, attribute] of urlAttributes) {
     for (const element of doc.querySelectorAll(selector)) {
-      const resolved = resolvePackageUrl(element.getAttribute(attribute), baseDir);
-      if (!resolved) continue;
-      const assetUrl = assetUrls.get(resolved.path);
-      if (assetUrl) element.setAttribute(attribute, `${assetUrl}${resolved.suffix}`);
+      rewriteElementUrlAttribute(element, attribute, baseDir, assetUrls, diagnostics, layoutPath);
+    }
+  }
+
+  for (const element of doc.querySelectorAll('use[href]')) {
+    rewriteElementUrlAttribute(element, 'href', baseDir, assetUrls, diagnostics, layoutPath, { kind: 'svg-use' });
+  }
+
+  for (const element of doc.querySelectorAll('use[xlink\\:href]')) {
+    rewriteElementUrlAttribute(element, 'xlink:href', baseDir, assetUrls, diagnostics, layoutPath, { kind: 'svg-use' });
+  }
+
+  for (const element of doc.querySelectorAll('iframe[src]')) {
+    rewriteElementUrlAttribute(element, 'src', baseDir, assetUrls, diagnostics, layoutPath, {
+      kind: 'iframe',
+      blockUnresolved: true
+    });
+    const src = element.getAttribute('src') || '';
+    if (src.startsWith('blob:')) {
+      element.setAttribute('sandbox', 'allow-scripts');
     }
   }
 
@@ -1246,21 +1318,46 @@ function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls) {
       const resolved = resolvePackageUrl(parts[0], baseDir);
       if (!resolved) return candidate;
       const assetUrl = assetUrls.get(resolved.path);
-      if (!assetUrl) return candidate;
+      if (!assetUrl) {
+        recordUnresolvedAsset(diagnostics, 'srcset', parts[0], resolved.path, layoutPath);
+        return candidate;
+      }
+      if (diagnostics) diagnostics.htmlRewriteCount += 1;
       return [`${assetUrl}${resolved.suffix}`, ...parts.slice(1)].join(' ');
     }).join(', ');
     element.setAttribute('srcset', rewritten);
   }
 
   for (const element of doc.querySelectorAll('[style]')) {
-    element.setAttribute('style', rewriteCssUrls(element.getAttribute('style') || '', layoutPath, assetUrls));
+    element.setAttribute('style', rewriteCssUrls(element.getAttribute('style') || '', layoutPath, assetUrls, diagnostics));
   }
 
   for (const style of doc.querySelectorAll('style')) {
-    style.textContent = rewriteCssUrls(style.textContent || '', layoutPath, assetUrls);
+    style.textContent = rewriteCssUrls(style.textContent || '', layoutPath, assetUrls, diagnostics);
   }
 
   return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
+}
+
+function detectJsStaticAssetReferences(assetUrls) {
+  const decoder = new TextDecoder();
+  const references = [];
+  const stringPattern = /(['"`])((?:\.{1,2}\/|\/)?[A-Za-z0-9._~!$&'()*+,;=:@/-]+\.(?:png|jpe?g|gif|webp|svg|ico|css|json|mp3|wav|ogg|mp4|webm|woff2?|ttf|otf)(?:[?#][^'"`]*)?)\1/gi;
+
+  for (const file of currentArchiveFiles) {
+    if (!file.contentType.includes('javascript')) continue;
+    const jsText = decoder.decode(file.bytes);
+    const baseDir = dirname(file.path);
+    let match;
+    while ((match = stringPattern.exec(jsText)) && references.length < 10) {
+      const resolved = resolvePackageUrl(match[2], baseDir);
+      if (resolved && assetUrls.has(resolved.path)) {
+        references.push({ owner: file.path, url: match[2], path: resolved.path });
+      }
+    }
+  }
+
+  return references;
 }
 
 function buildPreviewSrcdoc(layoutPath) {
@@ -1268,16 +1365,20 @@ function buildPreviewSrcdoc(layoutPath) {
   const runtimePayload = getLayoutRuntimePayload();
   const assetUrls = new Map();
   const decoder = new TextDecoder();
+  const diagnostics = createAssetRewriteDiagnostics();
+  const cssFiles = [];
 
   for (const file of currentArchiveFiles) {
-    if (file.path === layoutPath || file.contentType.startsWith('text/css') || file.contentType.startsWith('text/html')) continue;
+    if (file.contentType.startsWith('text/css')) {
+      cssFiles.push(file);
+      continue;
+    }
     assetUrls.set(file.path, createPreviewObjectUrl([file.bytes], file.contentType));
   }
 
-  for (const file of currentArchiveFiles) {
-    if (!file.contentType.startsWith('text/css')) continue;
+  for (const file of cssFiles) {
     const cssText = currentTextEntries.get(file.path) || decoder.decode(file.bytes);
-    const rewrittenCss = rewriteCssUrls(cssText, file.path, assetUrls);
+    const rewrittenCss = rewriteCssUrls(cssText, file.path, assetUrls, diagnostics);
     assetUrls.set(file.path, createPreviewObjectUrl([rewrittenCss], file.contentType));
   }
 
@@ -1287,7 +1388,20 @@ function buildPreviewSrcdoc(layoutPath) {
   }
 
   const injectedHtml = injectPreviewRuntime(layoutHtml, runtimePayload);
-  return rewriteHtmlAssetUrls(injectedHtml, layoutPath, assetUrls);
+  const srcdoc = rewriteHtmlAssetUrls(injectedHtml, layoutPath, assetUrls, diagnostics);
+  widgetAssetWarnings = diagnostics.unresolved.slice(0, 10);
+  renderAssetWarnings();
+  logPreviewTelemetry('asset map built', { count: assetUrls.size });
+  logPreviewTelemetry('HTML asset rewrites', { count: diagnostics.htmlRewriteCount });
+  logPreviewTelemetry('CSS asset rewrites', { count: diagnostics.cssRewriteCount });
+  if (diagnostics.unresolved.length) {
+    logPreviewTelemetry('unresolved local asset references', diagnostics.unresolved.slice(0, 10));
+  }
+  const jsStaticReferences = detectJsStaticAssetReferences(assetUrls);
+  if (jsStaticReferences.length) {
+    logPreviewTelemetry('JS static asset path rewriting is not performed', jsStaticReferences);
+  }
+  return srcdoc;
 }
 
 function setWidgetFrameSource(layoutUrl, srcdoc = '') {
