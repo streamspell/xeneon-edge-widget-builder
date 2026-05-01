@@ -108,6 +108,7 @@ let currentArchiveFiles = [];
 let currentTextEntries = new Map();
 let frameUpdateSequence = 0;
 let registeredWidgetSessionId = null;
+let currentPreviewObjectUrls = [];
 
 const SERVICE_WORKER_RELOAD_KEY = 'xeneon-widget-preview-sw-reload-once';
 const PREVIEW_ROUTING_FAILURE_MESSAGE = 'Preview routing failed. The hosted app shell was returned instead of widget HTML. Clear site data and reload, or check Service Worker registration.';
@@ -555,6 +556,21 @@ function logPreviewTelemetry(message, ...details) {
   console.log('[XENEON preview]', message, ...details);
 }
 
+function logWidgetRegistrationFiles(layoutPath, files) {
+  const firstPaths = files.slice(0, 10).map((file) => file.path);
+  const layoutFound = files.some((file) => normalizePath(file.path) === layoutPath);
+  logPreviewTelemetry('active layoutPath', { layoutPath });
+  logPreviewTelemetry('REGISTER_WIDGET file paths', { firstPaths, layoutFound });
+}
+
+function assertActiveLayoutRegistered(files) {
+  const layoutPath = getActiveLayoutPath();
+  logWidgetRegistrationFiles(layoutPath, files);
+  if (!layoutPath || !files.some((file) => normalizePath(file.path) === layoutPath)) {
+    throw new Error('Widget layout file was not registered in Service Worker cache.');
+  }
+}
+
 function setLibraryMessage(message = '', level = 'neutral') {
   if (libraryMessageTimeout) {
     window.clearTimeout(libraryMessageTimeout);
@@ -654,6 +670,7 @@ function formatDateTime(timestamp) {
 function resetCurrentWidgetState() {
   currentSessionId = null;
   registeredWidgetSessionId = null;
+  revokePreviewObjectUrls();
   loadedManifest = null;
   layouts = [];
   activeLayoutIndex = 0;
@@ -757,6 +774,29 @@ function normalizePath(filePath) {
   return decodeURIComponent(filePath).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/');
 }
 
+function splitUrlParts(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  const match = value.match(/^([^?#]*)([?#][\s\S]*)?$/);
+  return {
+    path: match?.[1] || value,
+    suffix: match?.[2] || ''
+  };
+}
+
+function isPackageLocalUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value || value.startsWith('#') || value.startsWith('//')) return false;
+  if (/^(?:[a-z][a-z0-9+.-]*:)/i.test(value)) return false;
+  return true;
+}
+
+function resolvePackageUrl(rawUrl, baseDir = '') {
+  if (!isPackageLocalUrl(rawUrl)) return null;
+  const { path, suffix } = splitUrlParts(rawUrl);
+  const resolved = resolvePath(baseDir, path);
+  return resolved ? { path: resolved, suffix } : null;
+}
+
 function dirname(filePath) {
   const idx = filePath.lastIndexOf('/');
   return idx === -1 ? '' : filePath.slice(0, idx);
@@ -829,13 +869,14 @@ async function ensureServiceWorkerReady() {
 
   if (!serviceWorkerRegistrationPromise) {
     serviceWorkerRegistrationPromise = navigator.serviceWorker.register('./sw.js').then((registration) => {
-      logPreviewTelemetry('SW ready');
+      logPreviewTelemetry('SW registered');
       return registration;
     });
   }
 
   const registration = await serviceWorkerRegistrationPromise;
   const readyRegistration = await navigator.serviceWorker.ready;
+  logPreviewTelemetry('SW ready');
   const activeWorker = readyRegistration.active || registration.active;
 
   if (!activeWorker) {
@@ -843,7 +884,7 @@ async function ensureServiceWorkerReady() {
   }
 
   if (!navigator.serviceWorker.controller) {
-    logPreviewTelemetry('SW controller missing before render');
+    logPreviewTelemetry('SW controller missing, reloading once');
     if (reloadForServiceWorkerControl()) {
       return new Promise(() => {});
     }
@@ -858,20 +899,36 @@ async function ensureServiceWorkerReady() {
 
 function postToServiceWorker(message, registration) {
   return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
+    let settled = false;
+    function cleanup() {
+      window.clearTimeout(timeout);
       navigator.serviceWorker.removeEventListener('message', onMessage);
-      reject(new Error('Timed out while registering widget assets with the preview service worker.'));
+    }
+
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    }
+
+    const timeout = window.setTimeout(() => {
+      finish(new Error('Timed out while registering widget assets with the preview service worker.'));
     }, 5000);
 
     function onMessage(event) {
       const data = event.data || {};
-      if (data.type === 'REGISTERED_WIDGET' && data.sessionId === message.sessionId) {
-        window.clearTimeout(timeout);
-        navigator.serviceWorker.removeEventListener('message', onMessage);
-        registeredWidgetSessionId = data.sessionId;
-        logPreviewTelemetry('REGISTERED_WIDGET received', data.sessionId);
-        resolve();
+      if (data.type !== 'REGISTERED_WIDGET') return;
+
+      if (data.sessionId !== message.sessionId) {
+        finish(new Error('Service Worker registered a different widget session than the preview requested.'));
+        return;
       }
+
+      registeredWidgetSessionId = data.sessionId;
+      logPreviewTelemetry('REGISTERED_WIDGET received', { sessionId: data.sessionId });
+      finish();
     }
 
     navigator.serviceWorker.addEventListener('message', onMessage);
@@ -879,12 +936,14 @@ function postToServiceWorker(message, registration) {
 
     Promise.resolve(target).then((worker) => {
       if (!worker) throw new Error('No active Service Worker found.');
-      logPreviewTelemetry('REGISTER_WIDGET sent', message.sessionId);
+      logPreviewTelemetry('REGISTER_WIDGET sent', {
+        sessionId: message.sessionId,
+        fileCount: message.files.length,
+        layoutPath: getActiveLayoutPath()
+      });
       worker.postMessage(message);
     }).catch((err) => {
-      window.clearTimeout(timeout);
-      navigator.serviceWorker.removeEventListener('message', onMessage);
-      reject(err);
+      finish(err);
     });
   });
 }
@@ -894,16 +953,13 @@ function looksLikeBuilderAppShell(text) {
   return BUILDER_APP_SHELL_MARKERS.some((marker) => sample.includes(marker));
 }
 
-async function verifyWidgetLayoutReachable() {
-  const layoutUrl = getLayoutUrl();
-  if (layoutUrl === 'about:blank') return;
-
+async function verifyLayoutUrl(layoutUrl, layoutPath) {
   const response = await fetch(layoutUrl, { cache: 'no-store' });
   if (response.status === 404) {
     throw new Error('Widget files were not registered with the preview service worker. Refresh and try again.');
   }
   if (!response.ok) {
-    throw new Error(`Preview service worker returned HTTP ${response.status} for ${layouts[activeLayoutIndex]?.path || 'widget layout'}.`);
+    throw new Error(`Preview service worker returned HTTP ${response.status} for ${layoutPath || 'widget layout'}.`);
   }
 
   const sample = await response.text();
@@ -1110,14 +1166,139 @@ async function runAutoValidation(fileName, buffer) {
 }
 
 function getLayoutUrl() {
-  if (!currentSessionId || !layouts[activeLayoutIndex]) return 'about:blank';
-  const baseUrl = `/__widget__/${currentSessionId}/${layouts[activeLayoutIndex].path}`;
+  const target = getCurrentLayoutTarget();
+  if (!target) return 'about:blank';
+  const baseUrl = `/__widget__/${target.sessionId}/${target.layoutPath}`;
   return previewReloadNonce ? `${baseUrl}?reload=${previewReloadNonce}` : baseUrl;
 }
 
+function getActiveLayoutPath() {
+  return layouts[activeLayoutIndex]?.path || '';
+}
+
+function getCurrentLayoutTarget() {
+  const layoutPath = getActiveLayoutPath();
+  if (!currentSessionId || !layoutPath) return null;
+  const baseUrl = `/__widget__/${currentSessionId}/${layoutPath}`;
+  return {
+    sessionId: currentSessionId,
+    layoutPath,
+    layoutUrl: previewReloadNonce ? `${baseUrl}?reload=${previewReloadNonce}` : baseUrl
+  };
+}
+
+function revokePreviewObjectUrls() {
+  for (const url of currentPreviewObjectUrls) {
+    URL.revokeObjectURL(url);
+  }
+  currentPreviewObjectUrls = [];
+}
+
+function trackPreviewObjectUrl(url) {
+  currentPreviewObjectUrls.push(url);
+  return url;
+}
+
+function createPreviewObjectUrl(parts, contentType) {
+  return trackPreviewObjectUrl(URL.createObjectURL(new Blob(parts, { type: contentType || 'application/octet-stream' })));
+}
+
+function rewriteCssUrls(cssText, cssPath, assetUrls) {
+  const baseDir = dirname(cssPath);
+  return String(cssText || '').replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (match, quote, rawUrl) => {
+    const resolved = resolvePackageUrl(rawUrl, baseDir);
+    if (!resolved) return match;
+    const assetUrl = assetUrls.get(resolved.path);
+    if (!assetUrl) return match;
+    return `url(${quote || ''}${assetUrl}${resolved.suffix}${quote || ''})`;
+  });
+}
+
+function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmlText, 'text/html');
+  const baseDir = dirname(layoutPath);
+  const urlAttributes = [
+    ['script[src]', 'src'],
+    ['link[href]', 'href'],
+    ['img[src]', 'src'],
+    ['image[href]', 'href'],
+    ['source[src]', 'src'],
+    ['video[src]', 'src'],
+    ['audio[src]', 'src'],
+    ['track[src]', 'src'],
+    ['embed[src]', 'src'],
+    ['object[data]', 'data']
+  ];
+
+  for (const [selector, attribute] of urlAttributes) {
+    for (const element of doc.querySelectorAll(selector)) {
+      const resolved = resolvePackageUrl(element.getAttribute(attribute), baseDir);
+      if (!resolved) continue;
+      const assetUrl = assetUrls.get(resolved.path);
+      if (assetUrl) element.setAttribute(attribute, `${assetUrl}${resolved.suffix}`);
+    }
+  }
+
+  for (const element of doc.querySelectorAll('[srcset]')) {
+    const rewritten = String(element.getAttribute('srcset') || '').split(',').map((candidate) => {
+      const parts = candidate.trim().split(/\s+/);
+      const resolved = resolvePackageUrl(parts[0], baseDir);
+      if (!resolved) return candidate;
+      const assetUrl = assetUrls.get(resolved.path);
+      if (!assetUrl) return candidate;
+      return [`${assetUrl}${resolved.suffix}`, ...parts.slice(1)].join(' ');
+    }).join(', ');
+    element.setAttribute('srcset', rewritten);
+  }
+
+  for (const element of doc.querySelectorAll('[style]')) {
+    element.setAttribute('style', rewriteCssUrls(element.getAttribute('style') || '', layoutPath, assetUrls));
+  }
+
+  for (const style of doc.querySelectorAll('style')) {
+    style.textContent = rewriteCssUrls(style.textContent || '', layoutPath, assetUrls);
+  }
+
+  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
+}
+
+function buildPreviewSrcdoc(layoutPath) {
+  revokePreviewObjectUrls();
+  const runtimePayload = getLayoutRuntimePayload();
+  const assetUrls = new Map();
+  const decoder = new TextDecoder();
+
+  for (const file of currentArchiveFiles) {
+    if (file.path === layoutPath || file.contentType.startsWith('text/css') || file.contentType.startsWith('text/html')) continue;
+    assetUrls.set(file.path, createPreviewObjectUrl([file.bytes], file.contentType));
+  }
+
+  for (const file of currentArchiveFiles) {
+    if (!file.contentType.startsWith('text/css')) continue;
+    const cssText = currentTextEntries.get(file.path) || decoder.decode(file.bytes);
+    const rewrittenCss = rewriteCssUrls(cssText, file.path, assetUrls);
+    assetUrls.set(file.path, createPreviewObjectUrl([rewrittenCss], file.contentType));
+  }
+
+  const layoutHtml = currentTextEntries.get(layoutPath);
+  if (typeof layoutHtml !== 'string') {
+    throw new Error('Widget layout file was not available for sandbox rendering.');
+  }
+
+  const injectedHtml = injectPreviewRuntime(layoutHtml, runtimePayload);
+  return rewriteHtmlAssetUrls(injectedHtml, layoutPath, assetUrls);
+}
+
+function setWidgetFrameSource(layoutUrl, srcdoc = '') {
+  widgetFrame.src = srcdoc ? 'about:blank' : layoutUrl;
+  widgetFrame.srcdoc = srcdoc;
+  widgetFrame.dataset.src = layoutUrl;
+}
+
 function clearWidgetFrameToBlank() {
-  widgetFrame.src = 'about:blank';
-  widgetFrame.dataset.src = 'about:blank';
+  revokePreviewObjectUrls();
+  setWidgetFrameSource('about:blank');
 }
 
 function showPreviewRoutingFailure(message) {
@@ -1143,8 +1324,9 @@ async function updateFrame(forceReload = false) {
   widgetFrame.style.width = `${size.width}px`;
   widgetFrame.style.height = `${size.height}px`;
 
-  const nextPath = getLayoutUrl();
-  const shouldShowEmpty = nextPath === 'about:blank';
+  const target = getCurrentLayoutTarget();
+  const nextPath = target?.layoutUrl || 'about:blank';
+  const shouldShowEmpty = !target;
   emptyState.hidden = !shouldShowEmpty;
   frameStage.hidden = shouldShowEmpty;
 
@@ -1155,14 +1337,27 @@ async function updateFrame(forceReload = false) {
   }
 
   if (forceReload || widgetFrame.dataset.src !== nextPath) {
+    logPreviewTelemetry('render requested', {
+      currentSessionId,
+      registeredWidgetSessionId,
+      layoutUrl: nextPath
+    });
     await ensureServiceWorkerReady();
     if (registeredWidgetSessionId !== currentSessionId) {
       throw new Error('Widget assets are not registered with the preview service worker yet. Refresh and try again.');
     }
-    await verifyWidgetLayoutReachable();
-    if (updateId !== frameUpdateSequence) return;
-    widgetFrame.src = nextPath;
-    widgetFrame.dataset.src = nextPath;
+    await verifyLayoutUrl(nextPath, target.layoutPath);
+    if (updateId !== frameUpdateSequence) {
+      clearWidgetFrameToBlank();
+      return;
+    }
+    const srcdoc = buildPreviewSrcdoc(target.layoutPath);
+    if (updateId !== frameUpdateSequence) {
+      clearWidgetFrameToBlank();
+      return;
+    }
+    setWidgetFrameSource(nextPath, srcdoc);
+    logPreviewTelemetry('iframe src set', { layoutUrl: nextPath });
   }
 
   updateActionButtons();
@@ -1628,6 +1823,7 @@ async function refreshWidgetSessionHtml() {
     const base64 = await toBase64FromArrayBuffer(outgoingBytes);
     files.push({ path: file.path, base64, contentType: file.contentType });
   }
+  assertActiveLayoutRegistered(files);
   if (isLocalDevServerHost()) {
     await registerWidgetSessionOnServer(currentSessionId, files);
   }
@@ -1958,6 +2154,7 @@ async function loadWidgetArchive({ fileName, bytes, preferredLayoutId, initialSe
     const base64 = await toBase64FromArrayBuffer(outgoingBytes);
     files.push({ path: file.path, base64, contentType: file.contentType });
   }
+  assertActiveLayoutRegistered(files);
 
   if (isLocalDevServerHost()) {
     await registerWidgetSessionOnServer(currentSessionId, files);

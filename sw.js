@@ -8,14 +8,25 @@ function logServiceWorkerTelemetry(message, ...details) {
   console.log('[XENEON sw]', message, ...details);
 }
 
-function textResponse(status, body) {
+function textResponse(status, body, extraHeaders = {}) {
   return new Response(body, {
     status,
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff'
+      'X-Content-Type-Options': 'nosniff',
+      ...extraHeaders
     }
+  });
+}
+
+function withCacheHeader(response, value) {
+  const headers = new Headers(response.headers);
+  headers.set('X-Xeneon-Widget-Cache', value);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
   });
 }
 
@@ -203,6 +214,9 @@ self.addEventListener('fetch', (event) => {
     const cache = await caches.open(WIDGET_CACHE_NAME);
     await pruneSessions(cache, await readSessionIndex(cache));
     const response = await cache.match(sessionRequest(sessionId, safePath));
-    return response || textResponse(404, 'Widget asset not available. The Service Worker must serve /__widget__ assets from Cache Storage.');
+    if (response) return withCacheHeader(response, 'hit');
+    return textResponse(404, 'Widget asset not available. The Service Worker must serve /__widget__ assets from Cache Storage.', {
+      'X-Xeneon-Widget-Cache': 'miss'
+    });
   })());
 });
