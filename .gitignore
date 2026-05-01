@@ -1,2 +1,5 @@
 .DS_Store
 node_modules/
+CHECKPOINT.md
+local-preview-qa*.png
+production-preview-qa*.png
