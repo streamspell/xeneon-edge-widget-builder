@@ -1198,29 +1198,36 @@ function getCurrentLayoutTarget() {
 }
 
 function revokePreviewObjectUrls() {
-  const revokedCount = currentPreviewObjectUrls.length;
-  for (const url of currentPreviewObjectUrls) {
-    URL.revokeObjectURL(url);
-  }
+  const revokedCount = revokeObjectUrlList(currentPreviewObjectUrls);
   currentPreviewObjectUrls = [];
   if (revokedCount) {
     logPreviewTelemetry('blob URLs revoked', { count: revokedCount });
   }
 }
 
-function trackPreviewObjectUrl(url) {
-  currentPreviewObjectUrls.push(url);
+function revokeObjectUrlList(urls) {
+  let revokedCount = 0;
+  for (const url of urls || []) {
+    URL.revokeObjectURL(url);
+    revokedCount += 1;
+  }
+  return revokedCount;
+}
+
+function trackPreviewObjectUrl(url, objectUrls = currentPreviewObjectUrls) {
+  objectUrls.push(url);
   return url;
 }
 
-function createPreviewObjectUrl(parts, contentType) {
-  return trackPreviewObjectUrl(URL.createObjectURL(new Blob(parts, { type: contentType || 'application/octet-stream' })));
+function createPreviewObjectUrl(parts, contentType, objectUrls = currentPreviewObjectUrls) {
+  return trackPreviewObjectUrl(URL.createObjectURL(new Blob(parts, { type: contentType || 'application/octet-stream' })), objectUrls);
 }
 
 function createAssetRewriteDiagnostics() {
   return {
     htmlRewriteCount: 0,
     cssRewriteCount: 0,
+    inlinedStylesheetCount: 0,
     unresolved: []
   };
 }
@@ -1270,12 +1277,11 @@ function rewriteElementUrlAttribute(element, attribute, baseDir, assetUrls, diag
   return true;
 }
 
-function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls, diagnostics = null) {
+function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls, diagnostics = null, cssTextByPath = new Map()) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(htmlText, 'text/html');
   const baseDir = dirname(layoutPath);
   const urlAttributes = [
-    ['link[href]', 'href'],
     ['script[src]', 'src'],
     ['img[src]', 'src'],
     ['source[src]', 'src'],
@@ -1286,6 +1292,26 @@ function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls, diagnostics = nul
     ['embed[src]', 'src'],
     ['object[data]', 'data']
   ];
+
+  for (const element of doc.querySelectorAll('link[href]')) {
+    const resolved = resolvePackageUrl(element.getAttribute('href'), baseDir);
+    const rel = String(element.getAttribute('rel') || '').toLowerCase().split(/\s+/);
+    if (!resolved) continue;
+
+    if (rel.includes('stylesheet') && cssTextByPath.has(resolved.path)) {
+      const style = doc.createElement('style');
+      style.setAttribute('data-xeneon-inline-href', element.getAttribute('href') || resolved.path);
+      style.textContent = cssTextByPath.get(resolved.path) || '';
+      element.replaceWith(style);
+      if (diagnostics) {
+        diagnostics.htmlRewriteCount += 1;
+        diagnostics.inlinedStylesheetCount += 1;
+      }
+      continue;
+    }
+
+    rewriteElementUrlAttribute(element, 'href', baseDir, assetUrls, diagnostics, layoutPath);
+  }
 
   for (const [selector, attribute] of urlAttributes) {
     for (const element of doc.querySelectorAll(selector)) {
@@ -1361,25 +1387,27 @@ function detectJsStaticAssetReferences(assetUrls) {
 }
 
 function buildPreviewSrcdoc(layoutPath) {
-  revokePreviewObjectUrls();
   const runtimePayload = getLayoutRuntimePayload();
   const assetUrls = new Map();
+  const objectUrls = [];
   const decoder = new TextDecoder();
   const diagnostics = createAssetRewriteDiagnostics();
   const cssFiles = [];
+  const cssTextByPath = new Map();
 
   for (const file of currentArchiveFiles) {
     if (file.contentType.startsWith('text/css')) {
       cssFiles.push(file);
       continue;
     }
-    assetUrls.set(file.path, createPreviewObjectUrl([file.bytes], file.contentType));
+    assetUrls.set(file.path, createPreviewObjectUrl([file.bytes], file.contentType, objectUrls));
   }
 
   for (const file of cssFiles) {
     const cssText = currentTextEntries.get(file.path) || decoder.decode(file.bytes);
     const rewrittenCss = rewriteCssUrls(cssText, file.path, assetUrls, diagnostics);
-    assetUrls.set(file.path, createPreviewObjectUrl([rewrittenCss], file.contentType));
+    cssTextByPath.set(file.path, rewrittenCss);
+    assetUrls.set(file.path, createPreviewObjectUrl([rewrittenCss], file.contentType, objectUrls));
   }
 
   const layoutHtml = currentTextEntries.get(layoutPath);
@@ -1388,12 +1416,13 @@ function buildPreviewSrcdoc(layoutPath) {
   }
 
   const injectedHtml = injectPreviewRuntime(layoutHtml, runtimePayload);
-  const srcdoc = rewriteHtmlAssetUrls(injectedHtml, layoutPath, assetUrls, diagnostics);
+  const srcdoc = rewriteHtmlAssetUrls(injectedHtml, layoutPath, assetUrls, diagnostics, cssTextByPath);
   widgetAssetWarnings = diagnostics.unresolved.slice(0, 10);
   renderAssetWarnings();
   logPreviewTelemetry('asset map built', { count: assetUrls.size });
   logPreviewTelemetry('HTML asset rewrites', { count: diagnostics.htmlRewriteCount });
   logPreviewTelemetry('CSS asset rewrites', { count: diagnostics.cssRewriteCount });
+  logPreviewTelemetry('inlined package stylesheets', { count: diagnostics.inlinedStylesheetCount });
   if (diagnostics.unresolved.length) {
     logPreviewTelemetry('unresolved local asset references', diagnostics.unresolved.slice(0, 10));
   }
@@ -1401,7 +1430,7 @@ function buildPreviewSrcdoc(layoutPath) {
   if (jsStaticReferences.length) {
     logPreviewTelemetry('JS static asset path rewriting is not performed', jsStaticReferences);
   }
-  return srcdoc;
+  return { srcdoc, objectUrls };
 }
 
 function setWidgetFrameSource(layoutUrl, srcdoc = '') {
@@ -1462,14 +1491,17 @@ async function updateFrame(forceReload = false) {
     }
     await verifyLayoutUrl(nextPath, target.layoutPath);
     if (updateId !== frameUpdateSequence) {
-      clearWidgetFrameToBlank();
       return;
     }
-    const srcdoc = buildPreviewSrcdoc(target.layoutPath);
+    const previewDocument = buildPreviewSrcdoc(target.layoutPath);
     if (updateId !== frameUpdateSequence) {
-      clearWidgetFrameToBlank();
+      const revokedCount = revokeObjectUrlList(previewDocument.objectUrls);
+      if (revokedCount) logPreviewTelemetry('blob URLs revoked', { count: revokedCount });
       return;
     }
+    revokePreviewObjectUrls();
+    currentPreviewObjectUrls = previewDocument.objectUrls;
+    const srcdoc = previewDocument.srcdoc;
     setWidgetFrameSource(nextPath, srcdoc);
     logPreviewTelemetry('iframe src set', { layoutUrl: nextPath });
   }
