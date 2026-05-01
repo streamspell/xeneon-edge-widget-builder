@@ -940,6 +940,21 @@ function createValidationStateFromResult(result) {
 
   const hasErrors = Array.isArray(result.errors) && result.errors.length > 0;
   const hasWarnings = Array.isArray(result.warnings) && result.warnings.length > 0;
+  const isHostedLite = result.source === 'hosted-lite';
+
+  if (isHostedLite) {
+    return {
+      level: 'warn',
+      badge: 'Limited',
+      summary: 'Hosted validation limited.',
+      details: lines.join('\n'),
+      source: result.source,
+      cliAvailable: Boolean(result.cliAvailable),
+      fileCount: result.summary?.fileCount ?? null,
+      widgetName: result.summary?.widgetName || null,
+      widgetVersion: result.summary?.widgetVersion || null
+    };
+  }
 
   if (!hasErrors && !hasWarnings) {
     return {
@@ -1009,6 +1024,20 @@ async function runAutoValidation(fileName, buffer) {
   });
 
   if (!response.ok) {
+    if ([404, 405, 501].includes(response.status)) {
+      return {
+        level: 'warn',
+        badge: 'Limited',
+        summary: 'Hosted validation limited.',
+        details: 'Full validation is available in the local Node builder.',
+        source: 'hosted-lite',
+        cliAvailable: false,
+        fileCount: null,
+        widgetName: null,
+        widgetVersion: null
+      };
+    }
+
     return {
       level: 'fail',
       badge: 'Failed',
@@ -1024,6 +1053,20 @@ async function runAutoValidation(fileName, buffer) {
 
   const result = await response.json();
   if (result.error) {
+    if (result.source === 'hosted-lite') {
+      return {
+        level: 'warn',
+        badge: 'Limited',
+        summary: 'Hosted validation limited.',
+        details: 'Full validation is available in the local Node builder.',
+        source: 'hosted-lite',
+        cliAvailable: false,
+        fileCount: null,
+        widgetName: null,
+        widgetVersion: null
+      };
+    }
+
     return {
       level: 'fail',
       badge: 'Failed',

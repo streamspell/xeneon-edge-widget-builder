@@ -12,6 +12,14 @@ When you deploy this app to Cloudflare Pages, the `functions/api/proxy.js` file 
 GET /api/proxy?url=<encoded_url>
 ```
 
+Cloudflare Pages also deploys `functions/api/validate.js` as a hosted-lite upload validation endpoint:
+
+```
+POST /api/validate
+```
+
+This endpoint keeps hosted upload flow compatible with the UI but does not run local CLI/package extraction checks. Full package validation remains local-only in `server.js` (`npm run dev`).
+
 The parent app (running in the browser) intercepts `fetch()` and `XMLHttpRequest` calls from the widget iframe and routes them through this endpoint. The widget never makes direct external requests — all traffic goes through the proxy, which validates the destination and returns only allowed content types.
 
 ---
@@ -130,6 +138,8 @@ The network preview toggle is session-only and off by default. It must be explic
 ---
 
 ## Known limitations
+
+0. **Hosted validation is limited.** On Cloudflare Pages, `/api/validate` returns a hosted-lite warning state and does not run `icuewidget validate` or full extraction-based checks.
 
 1. **No DNS IP re-validation.** The proxy validates the target hostname before the request, but cannot check the resolved IP. A hostname that resolves to a private IP will not be caught. The Cloudflare Workers sandbox mitigates some of this, but it is not a substitute for full SSRF protection.
 
