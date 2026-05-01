@@ -119,6 +119,7 @@ let currentTextEntries = new Map();
 let frameUpdateSequence = 0;
 let registeredWidgetSessionId = null;
 let currentPreviewObjectUrls = [];
+let activeUploadToken = 0;
 
 const SERVICE_WORKER_RELOAD_KEY = 'xeneon-widget-preview-sw-reload-once';
 const PREVIEW_ROUTING_FAILURE_MESSAGE = 'Preview routing failed. The hosted app shell was returned instead of widget HTML. Clear site data and reload, or check Service Worker registration.';
@@ -2401,6 +2402,7 @@ async function revalidateCurrentWidget() {
 
 async function loadWidgetFromUpload(file) {
   if (!file) return;
+  const uploadToken = ++activeUploadToken;
 
   try {
     if (file.size > MAX_CLIENT_UPLOAD_BYTES) {
@@ -2486,7 +2488,9 @@ async function loadWidgetFromUpload(file) {
     setStatusMessage(`Failed to load widget: ${error.message || error}`);
     setLibraryMessage(error.message || String(error), 'fail');
   } finally {
-    widgetFileInput.value = '';
+    if (uploadToken === activeUploadToken) {
+      widgetFileInput.value = '';
+    }
     renderLibrary();
     updateActionButtons();
   }
@@ -2592,11 +2596,11 @@ toggleValidationButton.addEventListener('click', () => {
 
 function handleFileSelection(event) {
   const file = event.target.files?.[0];
-  loadWidgetFromUpload(file);
+  if (!file) return;
+  void loadWidgetFromUpload(file);
 }
 
 widgetFileInput.addEventListener('change', handleFileSelection);
-widgetFileInput.addEventListener('input', handleFileSelection);
 
 viewportSelect.addEventListener('change', () => {
   void updateFrame().catch((error) => showPreviewRoutingFailure(error.message || String(error)));
