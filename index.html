@@ -98,17 +98,10 @@
         </section>
 
         <section id="settingsTabPanel" class="inspector-section inspector-panel" role="tabpanel" aria-labelledby="settingsTabButton" hidden>
-          <div class="section-heading note-heading">
+          <label class="section-heading note-heading network-toggle-heading" for="proxyEnabledInput">
             <span>Network Preview</span>
-          </div>
-          <label class="toggle-row" for="proxyEnabledInput">
-            <span>
-              <strong>Allow network preview for this session</strong>
-              <small>Network preview is for development. Only enable it for feeds/APIs you trust. Reload preview after enabling network preview.</small>
-            </span>
             <input id="proxyEnabledInput" type="checkbox" />
           </label>
-          <p id="proxyWarning" class="note-copy">Network preview is off. External network access is blocked in preview.</p>
 
           <div class="section-heading">
             <span>Widget Settings</span>

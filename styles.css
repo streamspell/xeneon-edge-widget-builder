@@ -570,6 +570,14 @@ select.field-control {
   font-size: 0.75rem;
 }
 
+.network-toggle-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
 .status-badge {
   display: inline-flex;
   align-items: center;

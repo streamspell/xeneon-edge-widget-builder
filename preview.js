@@ -85,7 +85,6 @@ const externalWarning = document.getElementById('externalWarning');
 const settingsList = document.getElementById('settingsList');
 const resetSettingsButton = document.getElementById('resetSettingsButton');
 const proxyEnabledInput = document.getElementById('proxyEnabledInput');
-const proxyWarning = document.getElementById('proxyWarning');
 
 const infoName = document.getElementById('infoName');
 const infoVersion = document.getElementById('infoVersion');
@@ -1739,7 +1738,6 @@ function renderSettingsPanel() {
     empty.className = 'settings-empty';
     empty.textContent = 'No widget is active yet.';
     settingsList.appendChild(empty);
-    proxyWarning.textContent = 'Network preview is off. External network access is blocked in preview.';
     updateActionButtons();
     return;
   }
@@ -1756,10 +1754,6 @@ function renderSettingsPanel() {
       settingsList.appendChild(renderSettingControl(definition));
     }
   }
-
-  proxyWarning.textContent = currentRuntimeSettings.proxyEnabled
-    ? 'Network preview is on. External GET requests are routed through /api/proxy. Reload preview after enabling network preview.'
-    : 'Network preview is off. External network access is blocked in preview.';
 
   updateActionButtons();
 }
