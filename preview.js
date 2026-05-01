@@ -107,10 +107,12 @@ let currentExternalDomains = [];
 let currentArchiveFiles = [];
 let currentTextEntries = new Map();
 let frameUpdateSequence = 0;
+let registeredWidgetSessionId = null;
 
 const SERVICE_WORKER_RELOAD_KEY = 'xeneon-widget-preview-sw-reload-once';
 const PREVIEW_ROUTING_FAILURE_MESSAGE = 'Preview routing failed. The hosted app shell was returned instead of widget HTML. Clear site data and reload, or check Service Worker registration.';
 const BUILDER_APP_SHELL_MARKERS = [
+  'widget asset not available',
   'xeneon edge',
   'widget builder',
   'upload .icuewidget',
@@ -651,6 +653,7 @@ function formatDateTime(timestamp) {
 
 function resetCurrentWidgetState() {
   currentSessionId = null;
+  registeredWidgetSessionId = null;
   loadedManifest = null;
   layouts = [];
   activeLayoutIndex = 0;
@@ -825,8 +828,8 @@ async function ensureServiceWorkerReady() {
   }
 
   if (!serviceWorkerRegistrationPromise) {
-    serviceWorkerRegistrationPromise = navigator.serviceWorker.register('sw.js').then((registration) => {
-      logPreviewTelemetry('Service worker registered.');
+    serviceWorkerRegistrationPromise = navigator.serviceWorker.register('./sw.js').then((registration) => {
+      logPreviewTelemetry('SW ready');
       return registration;
     });
   }
@@ -840,7 +843,7 @@ async function ensureServiceWorkerReady() {
   }
 
   if (!navigator.serviceWorker.controller) {
-    logPreviewTelemetry('Service worker active, but page not yet controlled.');
+    logPreviewTelemetry('SW controller missing before render');
     if (reloadForServiceWorkerControl()) {
       return new Promise(() => {});
     }
@@ -848,30 +851,35 @@ async function ensureServiceWorkerReady() {
   }
 
   sessionStorage.removeItem(SERVICE_WORKER_RELOAD_KEY);
-  logPreviewTelemetry('Service worker controlling page.');
+  logPreviewTelemetry('SW controller present');
 
   return readyRegistration;
 }
 
 function postToServiceWorker(message, registration) {
   return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => reject(new Error('Service Worker registration timed out.')), 5000);
+    const timeout = window.setTimeout(() => {
+      navigator.serviceWorker.removeEventListener('message', onMessage);
+      reject(new Error('Timed out while registering widget assets with the preview service worker.'));
+    }, 5000);
 
     function onMessage(event) {
       const data = event.data || {};
       if (data.type === 'REGISTERED_WIDGET' && data.sessionId === message.sessionId) {
         window.clearTimeout(timeout);
         navigator.serviceWorker.removeEventListener('message', onMessage);
-        logPreviewTelemetry('Widget session registered in Cache Storage.', data.sessionId);
+        registeredWidgetSessionId = data.sessionId;
+        logPreviewTelemetry('REGISTERED_WIDGET received', data.sessionId);
         resolve();
       }
     }
 
     navigator.serviceWorker.addEventListener('message', onMessage);
-    const target = registration?.active || navigator.serviceWorker.controller || navigator.serviceWorker.ready.then((reg) => reg.active);
+    const target = navigator.serviceWorker.controller || registration?.active || navigator.serviceWorker.ready.then((reg) => reg.active);
 
     Promise.resolve(target).then((worker) => {
       if (!worker) throw new Error('No active Service Worker found.');
+      logPreviewTelemetry('REGISTER_WIDGET sent', message.sessionId);
       worker.postMessage(message);
     }).catch((err) => {
       window.clearTimeout(timeout);
@@ -900,11 +908,11 @@ async function verifyWidgetLayoutReachable() {
 
   const sample = await response.text();
   if (looksLikeBuilderAppShell(sample)) {
-    logPreviewTelemetry('Layout URL rejected because app shell returned.', layoutUrl);
+    logPreviewTelemetry('layout verification failed', layoutUrl);
     throw new Error(PREVIEW_ROUTING_FAILURE_MESSAGE);
   }
 
-  logPreviewTelemetry('Layout URL verification passed.', layoutUrl);
+  logPreviewTelemetry('layout verification passed', layoutUrl);
 }
 
 async function registerWidgetSessionOnServer(sessionId, files) {
@@ -1148,6 +1156,9 @@ async function updateFrame(forceReload = false) {
 
   if (forceReload || widgetFrame.dataset.src !== nextPath) {
     await ensureServiceWorkerReady();
+    if (registeredWidgetSessionId !== currentSessionId) {
+      throw new Error('Widget assets are not registered with the preview service worker yet. Refresh and try again.');
+    }
     await verifyWidgetLayoutReachable();
     if (updateId !== frameUpdateSequence) return;
     widgetFrame.src = nextPath;
@@ -1604,6 +1615,7 @@ async function handleRuntimeSettingChange(name, value) {
 
 async function refreshWidgetSessionHtml() {
   if (!currentSessionId || !currentArchiveFiles.length) return;
+  registeredWidgetSessionId = null;
   const runtimePayload = getLayoutRuntimePayload();
   const files = [];
   for (const file of currentArchiveFiles) {
@@ -1919,6 +1931,7 @@ async function loadWidgetArchive({ fileName, bytes, preferredLayoutId, initialSe
   });
 
   currentSessionId = `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  registeredWidgetSessionId = null;
   currentLoadedWidgetBytes = bytes.slice(0);
   currentLoadedFileName = fileName;
   currentPackageFileCount = archiveFiles.length;
