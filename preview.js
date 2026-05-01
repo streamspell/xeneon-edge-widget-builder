@@ -81,7 +81,6 @@ const previewTabPanel = document.getElementById('previewTabPanel');
 const settingsTabPanel = document.getElementById('settingsTabPanel');
 const packageTabPanel = document.getElementById('packageTabPanel');
 const settingsSummary = document.getElementById('settingsSummary');
-const externalWarning = document.getElementById('externalWarning');
 const settingsList = document.getElementById('settingsList');
 const resetSettingsButton = document.getElementById('resetSettingsButton');
 const proxyEnabledInput = document.getElementById('proxyEnabledInput');
@@ -1729,8 +1728,6 @@ function renderSettingsPanel() {
   settingsList.innerHTML = '';
   const definitions = getCurrentLayoutDefinitions();
   proxyEnabledInput.checked = Boolean(currentRuntimeSettings.proxyEnabled);
-  externalWarning.hidden = !currentExternalResourceWarning;
-  externalWarning.textContent = currentExternalResourceWarning;
 
   if (!layouts.length) {
     settingsSummary.textContent = 'Load a widget layout with x-icue-property metadata to emulate widget settings locally.';
