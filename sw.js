@@ -4,6 +4,21 @@ const WIDGET_CACHE_NAME = 'xeneon-widget-preview-v1';
 const SESSION_INDEX_URL = '/__widget_meta__/index.json';
 const WIDGET_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 
+function logServiceWorkerTelemetry(message, ...details) {
+  console.log('[XENEON sw]', message, ...details);
+}
+
+function textResponse(status, body) {
+  return new Response(body, {
+    status,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
+    }
+  });
+}
+
 function cacheUrl(pathname) {
   return new URL(pathname, self.location.origin).toString();
 }
@@ -145,7 +160,8 @@ self.addEventListener('message', async (event) => {
         headers: {
           'Content-Type': file.contentType || 'application/octet-stream',
           'Cache-Control': 'no-store',
-          'Content-Security-Policy': WIDGET_CSP
+          'Content-Security-Policy': WIDGET_CSP,
+          'X-Content-Type-Options': 'nosniff'
         }
       }));
       sessionFiles.push(safePath);
@@ -154,6 +170,7 @@ self.addEventListener('message', async (event) => {
     index.sessions[data.sessionId] = { createdAt, files: sessionFiles };
     await pruneSessions(cache, index);
     await writeSessionIndex(cache, index);
+    logServiceWorkerTelemetry('Widget session registered in Cache Storage.', data.sessionId, sessionFiles.length);
 
     if (event.source && event.source.postMessage) {
       event.source.postMessage({ type: 'REGISTERED_WIDGET', sessionId: data.sessionId });
@@ -170,7 +187,7 @@ self.addEventListener('fetch', (event) => {
   const rest = url.pathname.slice(idx + marker.length);
   const firstSlash = rest.indexOf('/');
   if (firstSlash === -1) {
-    event.respondWith(new Response('Not found', { status: 404 }));
+    event.respondWith(textResponse(404, 'Widget asset not available. The Service Worker must serve /__widget__ assets from Cache Storage.'));
     return;
   }
 
@@ -178,7 +195,7 @@ self.addEventListener('fetch', (event) => {
   const rawPath = rest.slice(firstSlash + 1);
   const safePath = normalizeArchivePath(rawPath);
   if (!safePath) {
-    event.respondWith(new Response('Forbidden', { status: 403 }));
+    event.respondWith(textResponse(403, 'Forbidden'));
     return;
   }
 
@@ -186,6 +203,6 @@ self.addEventListener('fetch', (event) => {
     const cache = await caches.open(WIDGET_CACHE_NAME);
     await pruneSessions(cache, await readSessionIndex(cache));
     const response = await cache.match(sessionRequest(sessionId, safePath));
-    return response || new Response('Not found', { status: 404 });
+    return response || textResponse(404, 'Widget asset not available. The Service Worker must serve /__widget__ assets from Cache Storage.');
   })());
 });

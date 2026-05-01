@@ -106,8 +106,16 @@ let currentExternalResourceWarning = '';
 let currentExternalDomains = [];
 let currentArchiveFiles = [];
 let currentTextEntries = new Map();
+let frameUpdateSequence = 0;
 
 const SERVICE_WORKER_RELOAD_KEY = 'xeneon-widget-preview-sw-reload-once';
+const PREVIEW_ROUTING_FAILURE_MESSAGE = 'Preview routing failed. The hosted app shell was returned instead of widget HTML. Clear site data and reload, or check Service Worker registration.';
+const BUILDER_APP_SHELL_MARKERS = [
+  'xeneon edge',
+  'widget builder',
+  'upload .icuewidget',
+  'preview.js'
+];
 
 function createEmptyValidationState(summary = 'No validation run yet.') {
   return {
@@ -541,6 +549,10 @@ function setStatusMessage(message) {
   statusMessage.textContent = message;
 }
 
+function logPreviewTelemetry(message, ...details) {
+  console.log('[XENEON preview]', message, ...details);
+}
+
 function setLibraryMessage(message = '', level = 'neutral') {
   if (libraryMessageTimeout) {
     window.clearTimeout(libraryMessageTimeout);
@@ -656,7 +668,7 @@ function resetCurrentWidgetState() {
   setValidationState(createEmptyValidationState());
   updatePackageInfo();
   renderSettingsPanel();
-  updateFrame(true);
+  void updateFrame(true).catch((error) => showPreviewRoutingFailure(error.message || String(error)));
   updateActionButtons();
   switchInspectorTab('preview');
 }
@@ -798,24 +810,13 @@ function getCurrentLayoutId() {
   return layouts[activeLayoutIndex]?.id || null;
 }
 
-function waitForServiceWorkerController(timeoutMs = 5000) {
-  if (navigator.serviceWorker.controller) return Promise.resolve(navigator.serviceWorker.controller);
-
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
-      reject(new Error('Preview service worker is active but not controlling this page yet. Refresh and try again.'));
-    }, timeoutMs);
-
-    function onControllerChange() {
-      if (!navigator.serviceWorker.controller) return;
-      window.clearTimeout(timeout);
-      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
-      resolve(navigator.serviceWorker.controller);
-    }
-
-    navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-  });
+function reloadForServiceWorkerControl() {
+  if (sessionStorage.getItem(SERVICE_WORKER_RELOAD_KEY) !== '1') {
+    sessionStorage.setItem(SERVICE_WORKER_RELOAD_KEY, '1');
+    window.location.reload();
+    return true;
+  }
+  return false;
 }
 
 async function ensureServiceWorkerReady() {
@@ -824,31 +825,30 @@ async function ensureServiceWorkerReady() {
   }
 
   if (!serviceWorkerRegistrationPromise) {
-    serviceWorkerRegistrationPromise = navigator.serviceWorker.register('sw.js');
+    serviceWorkerRegistrationPromise = navigator.serviceWorker.register('sw.js').then((registration) => {
+      logPreviewTelemetry('Service worker registered.');
+      return registration;
+    });
   }
 
   const registration = await serviceWorkerRegistrationPromise;
   const readyRegistration = await navigator.serviceWorker.ready;
+  const activeWorker = readyRegistration.active || registration.active;
 
-  if (!navigator.serviceWorker.controller) {
-    await waitForServiceWorkerController();
-  }
-
-  const activeWorker = readyRegistration.active || registration.active || navigator.serviceWorker.controller;
   if (!activeWorker) {
     throw new Error('Service Worker did not activate. Refresh and try again.');
   }
 
-  if (navigator.serviceWorker.controller !== activeWorker) {
-    if (sessionStorage.getItem(SERVICE_WORKER_RELOAD_KEY) !== '1') {
-      sessionStorage.setItem(SERVICE_WORKER_RELOAD_KEY, '1');
-      window.location.reload();
+  if (!navigator.serviceWorker.controller) {
+    logPreviewTelemetry('Service worker active, but page not yet controlled.');
+    if (reloadForServiceWorkerControl()) {
       return new Promise(() => {});
     }
-    throw new Error('Preview service worker updated, but this page is still controlled by an older version. Refresh and try again.');
+    throw new Error('Preview service worker is active but not controlling this page yet. Refresh and try again.');
   }
 
   sessionStorage.removeItem(SERVICE_WORKER_RELOAD_KEY);
+  logPreviewTelemetry('Service worker controlling page.');
 
   return readyRegistration;
 }
@@ -862,6 +862,7 @@ function postToServiceWorker(message, registration) {
       if (data.type === 'REGISTERED_WIDGET' && data.sessionId === message.sessionId) {
         window.clearTimeout(timeout);
         navigator.serviceWorker.removeEventListener('message', onMessage);
+        logPreviewTelemetry('Widget session registered in Cache Storage.', data.sessionId);
         resolve();
       }
     }
@@ -880,6 +881,11 @@ function postToServiceWorker(message, registration) {
   });
 }
 
+function looksLikeBuilderAppShell(text) {
+  const sample = String(text || '').slice(0, 4096).toLowerCase();
+  return BUILDER_APP_SHELL_MARKERS.some((marker) => sample.includes(marker));
+}
+
 async function verifyWidgetLayoutReachable() {
   const layoutUrl = getLayoutUrl();
   if (layoutUrl === 'about:blank') return;
@@ -891,6 +897,14 @@ async function verifyWidgetLayoutReachable() {
   if (!response.ok) {
     throw new Error(`Preview service worker returned HTTP ${response.status} for ${layouts[activeLayoutIndex]?.path || 'widget layout'}.`);
   }
+
+  const sample = await response.text();
+  if (looksLikeBuilderAppShell(sample)) {
+    logPreviewTelemetry('Layout URL rejected because app shell returned.', layoutUrl);
+    throw new Error(PREVIEW_ROUTING_FAILURE_MESSAGE);
+  }
+
+  logPreviewTelemetry('Layout URL verification passed.', layoutUrl);
 }
 
 async function registerWidgetSessionOnServer(sessionId, files) {
@@ -1093,9 +1107,21 @@ function getLayoutUrl() {
   return previewReloadNonce ? `${baseUrl}?reload=${previewReloadNonce}` : baseUrl;
 }
 
-function updateFrame(forceReload = false) {
+function clearWidgetFrameToBlank() {
+  widgetFrame.src = 'about:blank';
+  widgetFrame.dataset.src = 'about:blank';
+}
+
+function showPreviewRoutingFailure(message) {
+  clearWidgetFrameToBlank();
+  setStatusMessage(message);
+  setLibraryMessage(message, 'fail');
+}
+
+async function updateFrame(forceReload = false) {
   const size = getViewportSize();
   const scale = getScale(size);
+  const updateId = ++frameUpdateSequence;
 
   frameDimensions.textContent = `${size.width} x ${size.height}`;
   activeViewportLabel.textContent = getViewportLabel();
@@ -1115,13 +1141,15 @@ function updateFrame(forceReload = false) {
   frameStage.hidden = shouldShowEmpty;
 
   if (shouldShowEmpty) {
-    widgetFrame.src = 'about:blank';
-    widgetFrame.dataset.src = 'about:blank';
+    clearWidgetFrameToBlank();
     updateActionButtons();
     return;
   }
 
   if (forceReload || widgetFrame.dataset.src !== nextPath) {
+    await ensureServiceWorkerReady();
+    await verifyWidgetLayoutReachable();
+    if (updateId !== frameUpdateSequence) return;
     widgetFrame.src = nextPath;
     widgetFrame.dataset.src = nextPath;
   }
@@ -1606,8 +1634,9 @@ async function handleProxyToggleChange() {
     try {
       await refreshWidgetSessionHtml();
       previewReloadNonce = Date.now();
-      updateFrame(true);
-    } catch {
+      await updateFrame(true);
+    } catch (error) {
+      showPreviewRoutingFailure(error.message || String(error));
       sendSettingsToPreviewFrame();
     }
   } else {
@@ -1922,7 +1951,6 @@ async function loadWidgetArchive({ fileName, bytes, preferredLayoutId, initialSe
   }
   const registration = await ensureServiceWorkerReady();
   await postToServiceWorker({ type: 'REGISTER_WIDGET', sessionId: currentSessionId, files }, registration);
-  await verifyWidgetLayoutReachable();
 
   activeWidgetName.textContent = loadedManifest.name || fileName;
   setStatusMessage('');
@@ -2004,7 +2032,7 @@ async function loadWidgetFromUpload(file) {
         proxyEnabled: false
       }
     });
-    updateFrame(true);
+    await updateFrame(true);
 
     const validationState = await runAutoValidation(file.name, bytes);
     setValidationState(validationState);
@@ -2078,7 +2106,7 @@ async function loadWidgetFromLibraryRecord(record) {
       : createEmptyValidationState()
     );
 
-    updateFrame(true);
+    await updateFrame(true);
     setStatusMessage('');
     setTransientLibraryMessage('Loaded from local widget library.', 'pass');
     updateActionButtons();
@@ -2154,15 +2182,18 @@ widgetFileInput.addEventListener('change', handleFileSelection);
 widgetFileInput.addEventListener('input', handleFileSelection);
 
 viewportSelect.addEventListener('change', () => {
-  updateFrame();
-  persistCurrentWidgetSettings();
+  void updateFrame().catch((error) => showPreviewRoutingFailure(error.message || String(error)));
+  persistCurrentWidgetSettings().catch(() => {});
 });
 
 reloadPreviewButton.addEventListener('click', () => {
   if (!currentSessionId) return;
   previewReloadNonce = Date.now();
-  updateFrame(true);
-  setStatusMessage('Preview reloaded.');
+  void updateFrame(true).then(() => {
+    setStatusMessage('Preview reloaded.');
+  }).catch((error) => {
+    showPreviewRoutingFailure(error.message || String(error));
+  });
 });
 
 revalidateButton.addEventListener('click', () => {
@@ -2205,20 +2236,24 @@ proxyEnabledInput.addEventListener('change', () => {
   });
 });
 
-window.addEventListener('resize', () => updateFrame());
+window.addEventListener('resize', () => {
+  void updateFrame().catch((error) => showPreviewRoutingFailure(error.message || String(error)));
+});
 widgetFrame.addEventListener('load', () => sendSettingsToPreviewFrame());
 
-navigator.serviceWorker.addEventListener('message', (event) => {
-  const data = event.data || {};
-  if (data.type !== 'WIDGET_ASSET_WARNING') return;
-  if (!currentSessionId || data.sessionId !== currentSessionId) return;
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (data.type !== 'WIDGET_ASSET_WARNING') return;
+    if (!currentSessionId || data.sessionId !== currentSessionId) return;
 
-  widgetAssetWarnings.push({
-    path: typeof data.path === 'string' ? data.path : '',
-    reason: typeof data.reason === 'string' ? data.reason : 'missing'
+    widgetAssetWarnings.push({
+      path: typeof data.path === 'string' ? data.path : '',
+      reason: typeof data.reason === 'string' ? data.reason : 'missing'
+    });
+    renderAssetWarnings();
   });
-  renderAssetWarnings();
-});
+}
 
 function handleBridgeTelemetry(data) {
   switch (data.type) {
@@ -2270,13 +2305,15 @@ setValidationState(createEmptyValidationState());
 setValidationDetailsExpanded(false);
 switchInspectorTab('preview');
 updatePackageInfo();
-updateFrame(true);
+void updateFrame(true).catch((error) => showPreviewRoutingFailure(error.message || String(error)));
 updateActionButtons();
 bootstrapLibrary();
 
-ensureServiceWorkerReady().catch((error) => {
-  if (!error || !String(error.message || error).includes('still controlled by an older version')) {
-    return;
-  }
-  setStatusMessage(error.message);
-});
+if ('serviceWorker' in navigator) {
+  ensureServiceWorkerReady().catch((error) => {
+    if (!error) return;
+    setStatusMessage(error.message || String(error));
+  });
+} else {
+  setStatusMessage('This browser does not support Service Workers.');
+}
