@@ -1,0 +1,18 @@
+{
+  "name": "xeneon-edge-widget-builder",
+  "version": "1.1.0",
+  "private": false,
+  "description": "XENEON EDGE Widget Builder for local .icuewidget preview, validation, and settings emulation.",
+  "author": "Daniel Mayhe (@danielmayhe)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/streamspell/xeneon-edge-widget-builder.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "license": "MIT"
+}

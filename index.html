@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>XENEON EDGE Widget Builder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="dashboard-shell">
+      <aside class="sidebar-pane" aria-label="Widget library">
+        <div class="sidebar-header">
+          <div class="sidebar-title-block">
+            <h1>XENEON EDGE<br />Widget Builder</h1>
+          </div>
+          <button id="uploadButton" class="primary-button" type="button">Upload .icuewidget</button>
+          <input id="widgetFile" class="visually-hidden" type="file" accept=".icuewidget,.zip,application/zip" />
+        </div>
+
+        <section class="library-section">
+          <div class="section-heading">
+            <span id="libraryCount" class="section-count">0</span>
+          </div>
+          <div id="widgetLibrary" class="widget-library" aria-live="polite"></div>
+        </section>
+
+        <div class="sidebar-footer">
+          <p id="libraryMessage" class="sidebar-message" aria-live="polite"></p>
+          <button id="clearLibraryButton" class="ghost-button compact-button" type="button">Clear All</button>
+        </div>
+      </aside>
+
+      <section class="preview-pane" aria-label="Widget preview">
+        <div class="preview-toolbar">
+          <div class="toolbar-primary">
+            <strong id="activeWidgetName">No widget selected</strong>
+          </div>
+          <div class="toolbar-status">
+            <span id="activeViewportLabel" class="toolbar-pill">XENEON L-H 1688x696</span>
+          </div>
+        </div>
+
+        <div class="preview-stage-shell">
+          <p id="statusMessage" class="status-message" aria-live="polite">Upload a <code>.icuewidget</code> to preview it locally.</p>
+          <p id="assetWarning" class="status-banner status-warn" hidden></p>
+
+          <div class="preview-frame">
+            <div class="frame-topbar">
+              <span>Simulated Screen</span>
+              <span id="frameDimensions">1688 x 696</span>
+            </div>
+            <div class="frame-canvas" id="frameCanvas">
+              <div id="emptyState" class="empty-state">
+                <p>Upload a <code>.icuewidget</code> to preview it locally.</p>
+              </div>
+              <div class="frame-stage" id="frameStage">
+                <div class="frame-scaler" id="frameScaler">
+                  <iframe
+                    id="widgetFrame"
+                    title="Widget preview frame"
+                    loading="eager"
+                    referrerpolicy="no-referrer"
+                    sandbox="allow-scripts"></iframe>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="inspector-pane" aria-label="Inspector and settings">
+        <div class="inspector-tabs" role="tablist" aria-label="Inspector tabs">
+          <button id="previewTabButton" class="inspector-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="previewTabPanel">Preview</button>
+          <button id="settingsTabButton" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsTabPanel">Settings</button>
+          <button id="packageTabButton" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="packageTabPanel">Package</button>
+        </div>
+
+        <section id="previewTabPanel" class="inspector-section inspector-panel" role="tabpanel" aria-labelledby="previewTabButton">
+          <div class="section-heading inspector-heading">
+            <span>Viewport</span>
+          </div>
+
+          <label class="field-label" for="viewportSelect">Preset</label>
+          <select id="viewportSelect" class="field-control">
+            <option value="XENEON_L_H" selected>XENEON L-H - 1688x696</option>
+            <option value="XENEON_S_H">XENEON S-H - 840x344</option>
+            <option value="XENEON_M_H">XENEON M-H - 840x696</option>
+            <option value="XENEON_XL_H">XENEON XL-H - 2536x696</option>
+            <option value="XENEON_S_V">XENEON S-V - 696x416</option>
+            <option value="XENEON_M_V">XENEON M-V - 696x840</option>
+            <option value="XENEON_L_V">XENEON L-V - 696x1688</option>
+            <option value="XENEON_XL_V">XENEON XL-V - 696x2536</option>
+          </select>
+
+          <div class="preview-actions">
+            <button id="reloadPreviewButton" class="ghost-button" type="button">Reload Preview</button>
+          </div>
+        </section>
+
+        <section id="settingsTabPanel" class="inspector-section inspector-panel" role="tabpanel" aria-labelledby="settingsTabButton" hidden>
+          <div class="section-heading">
+            <span>Widget Settings</span>
+          </div>
+          <p id="settingsSummary" class="validation-summary">Load a widget layout with <code>x-icue-property</code> metadata to emulate widget settings locally.</p>
+          <p id="externalWarning" class="status-banner status-warn" hidden></p>
+          <div id="settingsList" class="settings-list" aria-live="polite"></div>
+          <div class="action-row">
+            <button id="resetSettingsButton" class="ghost-button" type="button">Reset To Defaults</button>
+          </div>
+
+          <div class="section-heading note-heading">
+            <span>Network Preview</span>
+          </div>
+          <label class="toggle-row" for="proxyEnabledInput">
+            <span>
+              <strong>Allow network preview for this session</strong>
+              <small>Network preview is for development. Only enable it for feeds/APIs you trust.</small>
+            </span>
+            <input id="proxyEnabledInput" type="checkbox" />
+          </label>
+          <p id="proxyWarning" class="note-copy">Local proxy is off. Live feeds that require CORS bypass will stay blocked in preview.</p>
+        </section>
+
+        <section id="packageTabPanel" class="inspector-section inspector-panel" role="tabpanel" aria-labelledby="packageTabButton" hidden>
+          <div class="section-heading">
+            <span>Validation</span>
+            <span id="validationBadge" class="status-badge status-neutral">Idle</span>
+          </div>
+          <p id="validationSummary" class="validation-summary">No validation run yet.</p>
+          <button id="toggleValidationButton" class="ghost-button compact-button" type="button" aria-expanded="false" aria-controls="validationDetailsWrap">Show Details</button>
+          <div id="validationDetailsWrap" class="validation-details-wrap" hidden>
+            <pre id="validationDetails" class="validation-details"></pre>
+          </div>
+          <div class="action-row">
+            <button id="revalidateButton" class="ghost-button" type="button">Revalidate</button>
+            <button id="deleteWidgetButton" class="ghost-button danger-button" type="button">Delete Widget</button>
+          </div>
+
+          <div class="section-heading">
+            <span>Package Info</span>
+          </div>
+          <dl class="info-list">
+            <div>
+              <dt>Name</dt>
+              <dd id="infoName">-</dd>
+            </div>
+            <div>
+              <dt>Version</dt>
+              <dd id="infoVersion">-</dd>
+            </div>
+            <div>
+              <dt>ID</dt>
+              <dd id="infoId">-</dd>
+            </div>
+            <div>
+              <dt>Files</dt>
+              <dd id="infoFileCount">-</dd>
+            </div>
+            <div>
+              <dt>Validation Source</dt>
+              <dd id="infoSource">-</dd>
+            </div>
+            <div>
+              <dt>CLI</dt>
+              <dd id="infoCli">-</dd>
+            </div>
+          </dl>
+
+          <div class="section-heading note-heading">
+            <span>Security Note</span>
+          </div>
+          <p class="note-copy">Preview runs in a sandboxed iframe with <code>allow-scripts</code> only. Validation hardening, path safety, zip limits, CSP, and service worker asset persistence remain enabled.</p>
+        </section>
+      </aside>
+    </main>
+
+    <script src="vendor/jszip.min.js"></script>
+    <script src="preview.js"></script>
+  </body>
+</html>
