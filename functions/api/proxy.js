@@ -26,6 +26,12 @@ function isAllowedProxyContentType(contentType) {
   return /^(application\/(rss\+xml|atom\+xml|xml|json|[\w.+-]+\+xml|[\w.+-]+\+json)|text\/(plain|xml|json))$/.test(value);
 }
 
+function isRedditJsonEndpoint(url) {
+  const hostname = String(url?.hostname || '').toLowerCase();
+  if (hostname !== 'reddit.com' && hostname !== 'www.reddit.com') return false;
+  return /(?:\/\.json|\.json)$/i.test(String(url?.pathname || ''));
+}
+
 function isPrivateIPv4(host) {
   const parts = host.split('.').map((p) => Number.parseInt(p, 10));
   if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true;
@@ -150,6 +156,9 @@ export async function onRequest(context) {
 
   const contentType = upstream.headers.get('content-type') || '';
   if (!isAllowedProxyContentType(contentType)) {
+    if (/^text\/html(?:$|;)/i.test(contentType) && isRedditJsonEndpoint(target)) {
+      return jsonError(415, 'Reddit returned HTML instead of JSON. Check the Reddit API URL or try adding /.json.');
+    }
     return jsonError(415, `Blocked proxy content type: ${contentType || 'unknown'}`);
   }
 

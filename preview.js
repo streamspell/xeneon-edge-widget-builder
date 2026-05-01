@@ -331,6 +331,47 @@ function getCurrentLayoutDefinitions() {
   return layoutId ? (currentRuntimeSettings.definitionsByLayout?.[layoutId] || []) : [];
 }
 
+function normalizePreviewRedditJsonUrl(rawValue) {
+  const value = normalizeIcueString(rawValue);
+  if (!value) return value;
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return value;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname !== 'reddit.com' && hostname !== 'www.reddit.com') return value;
+  if (/\/\.json$/i.test(parsed.pathname)) return parsed.toString();
+
+  const normalizedPath = parsed.pathname.replace(/\/([^/]+)\.json$/i, '/$1/.json');
+  if (normalizedPath === parsed.pathname) return value;
+
+  parsed.pathname = normalizedPath;
+  return parsed.toString();
+}
+
+function getSettingHintText(definition, currentValue) {
+  if (definition.type !== 'textfield') return '';
+  const normalizedValue = normalizePreviewRedditJsonUrl(currentValue);
+  if (!normalizedValue) return '';
+
+  let parsed;
+  try {
+    parsed = new URL(normalizedValue);
+  } catch {
+    return '';
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if ((hostname === 'reddit.com' || hostname === 'www.reddit.com') && /\/\.json$/i.test(parsed.pathname)) {
+    return 'Reddit JSON preview tip: prefer <code>/.json</code> endpoints if Reddit returns HTML instead of JSON.';
+  }
+  return '';
+}
+
 function normalizeSettingValue(definition, rawValue) {
   if (definition.type === 'checkbox') {
     const boolValue = parseMaybeBoolean(rawValue);
@@ -341,7 +382,7 @@ function normalizeSettingValue(definition, rawValue) {
     const parsed = parseMaybeNumber(rawValue);
     return parsed == null ? fallback : parsed;
   }
-  return normalizeIcueString(rawValue != null && rawValue !== '' ? rawValue : definition.defaultValue);
+  return normalizePreviewRedditJsonUrl(rawValue != null && rawValue !== '' ? rawValue : definition.defaultValue);
 }
 
 function ensureWidgetSettingDefaults() {
@@ -349,8 +390,12 @@ function ensureWidgetSettingDefaults() {
   let changed = false;
   for (const definitions of Object.values(currentRuntimeSettings.definitionsByLayout || {})) {
     for (const definition of definitions) {
-      if (!(definition.name in nextValues)) {
-        nextValues[definition.name] = normalizeSettingValue(definition, definition.defaultValue);
+      const normalizedValue = normalizeSettingValue(
+        definition,
+        definition.name in nextValues ? nextValues[definition.name] : definition.defaultValue
+      );
+      if (!(definition.name in nextValues) || !Object.is(nextValues[definition.name], normalizedValue)) {
+        nextValues[definition.name] = normalizedValue;
         changed = true;
       }
     }
@@ -413,7 +458,7 @@ tell({type:'ICUE_PREVIEW_BRIDGE_READY'});
   var lsOk=false;
   try{void window.localStorage;lsOk=true;}catch(_){}
   if(!lsOk){
-    var mk=function(){var s=Object.create(null);var o={getItem:function(k){return s.hasOwnProperty(k)?s[k]:null;},setItem:function(k,v){s[k]=String(v);},removeItem:function(k){delete s[k];},clear:function(){for(var k in s)delete s[k];},key:function(i){return Object.keys(s)[i]||null;}};Object.defineProperty(o,'length',{get:function(){return Object.keys(s).length;}});return o;};
+    var mk=function(){var s=Object.create(null);var o={getItem:function(k){return Object.prototype.hasOwnProperty.call(s,k)?s[k]:null;},setItem:function(k,v){s[k]=String(v);},removeItem:function(k){delete s[k];},clear:function(){for(var k in s)delete s[k];},key:function(i){return Object.keys(s)[i]||null;}};Object.defineProperty(o,'length',{get:function(){return Object.keys(s).length;}});return o;};
     try{Object.defineProperty(window,'localStorage',{value:mk(),configurable:true,writable:true});}catch(_){}
     try{Object.defineProperty(window,'sessionStorage',{value:mk(),configurable:true,writable:true});}catch(_){}
     tell({type:'ICUE_PREVIEW_BRIDGE_READY',shimmed:'localStorage+sessionStorage'});
@@ -1712,7 +1757,7 @@ function renderSettingsPanel() {
   }
 
   proxyWarning.textContent = currentRuntimeSettings.proxyEnabled
-    ? 'Network preview is on. External GET requests are routed through /api/proxy.'
+    ? 'Network preview is on. External GET requests are routed through /api/proxy. Reload preview after enabling network preview.'
     : 'Network preview is off. External network access is blocked in preview.';
 
   updateActionButtons();
@@ -1842,6 +1887,13 @@ function renderSettingControl(definition) {
   }
 
   card.appendChild(control);
+  const hintText = getSettingHintText(definition, currentValue);
+  if (hintText) {
+    const hint = document.createElement('p');
+    hint.className = 'settings-empty';
+    hint.innerHTML = hintText;
+    card.appendChild(hint);
+  }
   return card;
 }
 
@@ -1949,11 +2001,13 @@ async function persistCurrentWidgetSettings() {
 }
 
 async function handleRuntimeSettingChange(name, value) {
+  const definition = getCurrentLayoutDefinitions().find((item) => item.name === name);
+  const nextValue = definition ? normalizeSettingValue(definition, value) : value;
   currentRuntimeSettings = {
     ...currentRuntimeSettings,
     values: {
       ...currentRuntimeSettings.values,
-      [name]: value
+      [name]: nextValue
     }
   };
   renderSettingsPanel();

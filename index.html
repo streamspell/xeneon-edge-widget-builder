@@ -98,6 +98,18 @@
         </section>
 
         <section id="settingsTabPanel" class="inspector-section inspector-panel" role="tabpanel" aria-labelledby="settingsTabButton" hidden>
+          <div class="section-heading note-heading">
+            <span>Network Preview</span>
+          </div>
+          <label class="toggle-row" for="proxyEnabledInput">
+            <span>
+              <strong>Allow network preview for this session</strong>
+              <small>Network preview is for development. Only enable it for feeds/APIs you trust. Reload preview after enabling network preview.</small>
+            </span>
+            <input id="proxyEnabledInput" type="checkbox" />
+          </label>
+          <p id="proxyWarning" class="note-copy">Network preview is off. External network access is blocked in preview.</p>
+
           <div class="section-heading">
             <span>Widget Settings</span>
           </div>
@@ -107,18 +119,6 @@
           <div class="action-row">
             <button id="resetSettingsButton" class="ghost-button" type="button">Reset To Defaults</button>
           </div>
-
-          <div class="section-heading note-heading">
-            <span>Network Preview</span>
-          </div>
-          <label class="toggle-row" for="proxyEnabledInput">
-            <span>
-              <strong>Allow network preview for this session</strong>
-              <small>Network preview is for development. Only enable it for feeds/APIs you trust.</small>
-            </span>
-            <input id="proxyEnabledInput" type="checkbox" />
-          </label>
-          <p id="proxyWarning" class="note-copy">Local proxy is off. Live feeds that require CORS bypass will stay blocked in preview.</p>
         </section>
 
         <section id="packageTabPanel" class="inspector-section inspector-panel" role="tabpanel" aria-labelledby="packageTabButton" hidden>
