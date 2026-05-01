@@ -129,6 +129,7 @@ const BUILDER_APP_SHELL_MARKERS = [
   'upload .icuewidget',
   'preview.js'
 ];
+const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src blob: data:; font-src blob: data:; media-src blob: data:; connect-src 'none'; object-src blob:; frame-src blob:; worker-src blob:; base-uri 'none'; form-action 'none'";
 
 function createEmptyValidationState(summary = 'No validation run yet.') {
   return {
@@ -395,6 +396,10 @@ function serializeForInlineScript(value) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+function buildPreviewSecurityMeta() {
+  return `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
+}
+
 function buildPreviewRuntimeBridge(runtimePayload) {
   const payload = serializeForInlineScript(runtimePayload);
   // Bridge is injected at the start of <head>, before any widget scripts.
@@ -548,14 +553,16 @@ if(NativeXHR){
 }
 
 function injectPreviewRuntime(htmlText, runtimePayload) {
+  const securityMeta = buildPreviewSecurityMeta();
   const bridge = buildPreviewRuntimeBridge(runtimePayload);
+  const injection = `${securityMeta}${bridge}`;
   if (/<head[^>]*>/i.test(htmlText)) {
-    return htmlText.replace(/<head([^>]*)>/i, `<head$1>${bridge}`);
+    return htmlText.replace(/<head([^>]*)>/i, `<head$1>${injection}`);
   }
   if (/<body[^>]*>/i.test(htmlText)) {
-    return htmlText.replace(/<body([^>]*)>/i, `<body$1>${bridge}`);
+    return htmlText.replace(/<body([^>]*)>/i, `<body$1>${injection}`);
   }
-  return `${bridge}${htmlText}`;
+  return `${injection}${htmlText}`;
 }
 
 function setStatusMessage(message) {
@@ -2636,7 +2643,12 @@ function handleBridgeTelemetry(data) {
   }
 }
 
+function isMessageFromWidgetFrame(event) {
+  return Boolean(event?.source && widgetFrame.contentWindow && event.source === widgetFrame.contentWindow);
+}
+
 window.addEventListener('message', (event) => {
+  if (!isMessageFromWidgetFrame(event)) return;
   const data = event.data || {};
   if (!data.type) return;
   if (data.type.startsWith('ICUE_PREVIEW_BRIDGE') || data.type === 'ICUE_PREVIEW_SETTINGS_APPLIED' ||

@@ -1,3 +1,35 @@
+@font-face {
+  font-family: "Corsair Saira";
+  src: url("https://www.corsair.com/fonts/Saira/Saira-VariableFont_wdth,wght.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Corsair Saira Condensed";
+  src: url("https://www.corsair.com/fonts/Saira/SairaCondensed-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Corsair Saira Condensed";
+  src: url("https://www.corsair.com/fonts/Saira/SairaCondensed-Medium.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Corsair Saira Condensed";
+  src: url("https://www.corsair.com/fonts/Saira/SairaCondensed-SemiBold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
 :root {
   --bg: #0b0b0c;
   --panel-1: #0f0f10;
@@ -12,8 +44,9 @@
   --warn: #f7e600;
   --danger: #ff7f7f;
   --radius: 0;
-  --font-body: "IBM Plex Sans", "Segoe UI", Arial, sans-serif;
-  --font-mono: "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-body: "Corsair Saira", "Segoe UI", Arial, sans-serif;
+  --font-display: "Corsair Saira Condensed", "Corsair Saira", "Segoe UI", Arial, sans-serif;
+  --font-mono: "Corsair Saira", "Segoe UI", Arial, sans-serif;
 }
 
 * {
@@ -39,6 +72,23 @@ select,
 input {
   font: inherit;
   color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+button,
+.primary-button,
+.ghost-button,
+.section-heading,
+.toolbar-pill,
+.frame-topbar,
+.inspector-tab,
+.status-badge {
+  font-family: var(--font-display);
 }
 
 button {
