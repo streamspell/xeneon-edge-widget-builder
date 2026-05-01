@@ -910,6 +910,10 @@ async function registerWidgetSessionOnServer(sessionId, files) {
   }
 }
 
+function isLocalDevServerHost() {
+  return location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+}
+
 function createValidationStateFromResult(result) {
   const lines = [];
   lines.push(`Source: ${result.source}`);
@@ -1584,7 +1588,9 @@ async function refreshWidgetSessionHtml() {
     const base64 = await toBase64FromArrayBuffer(outgoingBytes);
     files.push({ path: file.path, base64, contentType: file.contentType });
   }
-  await registerWidgetSessionOnServer(currentSessionId, files);
+  if (isLocalDevServerHost()) {
+    await registerWidgetSessionOnServer(currentSessionId, files);
+  }
   const registration = await ensureServiceWorkerReady();
   await postToServiceWorker({ type: 'REGISTER_WIDGET', sessionId: currentSessionId, files }, registration);
 }
@@ -1911,7 +1917,9 @@ async function loadWidgetArchive({ fileName, bytes, preferredLayoutId, initialSe
     files.push({ path: file.path, base64, contentType: file.contentType });
   }
 
-  await registerWidgetSessionOnServer(currentSessionId, files);
+  if (isLocalDevServerHost()) {
+    await registerWidgetSessionOnServer(currentSessionId, files);
+  }
   const registration = await ensureServiceWorkerReady();
   await postToServiceWorker({ type: 'REGISTER_WIDGET', sessionId: currentSessionId, files }, registration);
   await verifyWidgetLayoutReachable();
