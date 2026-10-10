@@ -117,6 +117,7 @@ let currentTextEntries = new Map();
 let frameUpdateSequence = 0;
 let registeredWidgetSessionId = null;
 let currentPreviewObjectUrls = [];
+let widgetFrameLoadCount = 0;
 let activeUploadToken = 0;
 
 const SERVICE_WORKER_RELOAD_KEY = 'xeneon-widget-preview-sw-reload-once';
@@ -128,7 +129,10 @@ const BUILDER_APP_SHELL_MARKERS = [
   'upload .icuewidget',
   'preview.js'
 ];
-const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src blob: data:; font-src blob: data:; media-src blob: data:; connect-src 'none'; object-src blob:; frame-src blob:; worker-src blob:; base-uri 'none'; form-action 'none'";
+// Package files are served from the widget's own /__widget__/<session>/ path, so they load as 'self'.
+// Network stays closed unless Network Preview is on; then loopback (companion apps) is reachable too.
+const PREVIEW_CSP_BASE = "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; object-src 'self' blob:; frame-src 'self' blob:; worker-src 'self' blob:; base-uri 'self'; form-action 'none'";
+const PREVIEW_LOOPBACK_SOURCES = 'http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*';
 
 function createEmptyValidationState(summary = 'No validation run yet.') {
   return {
@@ -432,16 +436,31 @@ function getLayoutRuntimePayload() {
       options: definition.options
     })),
     proxyEnabled: Boolean(currentRuntimeSettings.proxyEnabled),
-    layoutId: getCurrentLayoutId()
+    layoutId: getCurrentLayoutId(),
+    uniqueId: getPreviewUniqueId()
   };
+}
+
+// iCUE gives each widget instance a QUuid. Derive a stable one from the widget id so storage
+// keyed by uniqueId survives reloads, the way it does on the device.
+function getPreviewUniqueId() {
+  const seed = `${loadedManifest?.id || ''}|${currentLoadedFileName || ''}`;
+  let hex = '';
+  for (let round = 0; hex.length < 32; round += 1) {
+    let hash = 0x811c9dc5 ^ round;
+    for (let i = 0; i < seed.length; i += 1) hash = Math.imul(hash ^ seed.charCodeAt(i), 0x01000193);
+    hex += (hash >>> 0).toString(16).padStart(8, '0');
+  }
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 function serializeForInlineScript(value) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
-function buildPreviewSecurityMeta() {
-  return `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
+function buildPreviewSecurityMeta(proxyEnabled) {
+  const connect = proxyEnabled ? `connect-src 'self' ${PREVIEW_LOOPBACK_SOURCES}` : "connect-src 'self'";
+  return `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP_BASE}; ${connect}">`;
 }
 
 function buildPreviewRuntimeBridge(runtimePayload) {
@@ -464,6 +483,9 @@ tell({type:'ICUE_PREVIEW_BRIDGE_READY'});
   }
 })();
 var initial=${payload};
+if(initial.uniqueId&&typeof window.uniqueId==='undefined'){try{window.uniqueId=initial.uniqueId;}catch(_){}}
+var LOOPBACK=/^(127\.0\.0\.1|localhost|\[::1\])$/i;
+var shouldProxy=function(u){try{var x=new URL(u,location.href);return /^https?:$/.test(x.protocol)&&x.origin!==location.origin&&!LOOPBACK.test(x.hostname);}catch(_){return false;}};
 var clone=function(v){return JSON.parse(JSON.stringify(v||{}));};
 var DIRECT_HOOKS=['onIcueInitialized','onIcueDataUpdated'];
 var SAFE_ID=/^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -536,7 +558,7 @@ if(nativeFetch){
     var req=resource instanceof Request?resource:new Request(resource,init);
     var tu=req.url||String(resource||'');
     var method=(req.method||(init&&init.method)||'GET').toUpperCase();
-    if(window.__ICUE_PREVIEW_PROXY_ENABLED__&&/^https?:/i.test(tu)&&method==='GET'){
+    if(window.__ICUE_PREVIEW_PROXY_ENABLED__&&shouldProxy(tu)&&method==='GET'){
       tell({type:'ICUE_PREVIEW_FETCH_INTERCEPTED',url:tu});
       return proxyFetch(tu,req.headers.get('accept')||'');
     }
@@ -561,7 +583,7 @@ if(NativeXHR){
     this.open=function(method,url){
       proxyMethod=String(method||'GET').toUpperCase();
       proxyUrl=String(url||'');
-      useProxy=!!window.__ICUE_PREVIEW_PROXY_ENABLED__&&/^https?:/i.test(proxyUrl)&&proxyMethod==='GET';
+      useProxy=!!window.__ICUE_PREVIEW_PROXY_ENABLED__&&shouldProxy(proxyUrl)&&proxyMethod==='GET';
       if(!useProxy){xhr.open.apply(xhr,arguments);}
     };
     this.setRequestHeader=function(n,v){if(!useProxy){xhr.setRequestHeader(n,v);}};
@@ -597,7 +619,7 @@ if(NativeXHR){
 }
 
 function injectPreviewRuntime(htmlText, runtimePayload) {
-  const securityMeta = buildPreviewSecurityMeta();
+  const securityMeta = buildPreviewSecurityMeta(Boolean(runtimePayload?.proxyEnabled));
   const bridge = buildPreviewRuntimeBridge(runtimePayload);
   const injection = `${securityMeta}${bridge}`;
   if (/<head[^>]*>/i.test(htmlText)) {
@@ -1265,229 +1287,19 @@ function revokeObjectUrlList(urls) {
   return revokedCount;
 }
 
-function trackPreviewObjectUrl(url, objectUrls = currentPreviewObjectUrls) {
-  objectUrls.push(url);
-  return url;
-}
 
-function createPreviewObjectUrl(parts, contentType, objectUrls = currentPreviewObjectUrls) {
-  return trackPreviewObjectUrl(URL.createObjectURL(new Blob(parts, { type: contentType || 'application/octet-stream' })), objectUrls);
-}
 
-function createAssetRewriteDiagnostics() {
-  return {
-    htmlRewriteCount: 0,
-    cssRewriteCount: 0,
-    inlinedStylesheetCount: 0,
-    unresolved: []
-  };
-}
 
-function recordUnresolvedAsset(diagnostics, kind, rawUrl, resolvedPath, ownerPath) {
-  if (!diagnostics) return;
-  diagnostics.unresolved.push({
-    kind,
-    url: String(rawUrl || ''),
-    path: resolvedPath || '',
-    owner: ownerPath || ''
-  });
-}
 
-function rewriteCssUrls(cssText, cssPath, assetUrls, diagnostics = null) {
-  const baseDir = dirname(cssPath);
-  return String(cssText || '').replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (match, quote, rawUrl) => {
-    const resolved = resolvePackageUrl(rawUrl, baseDir);
-    if (!resolved) return match;
-    const assetUrl = assetUrls.get(resolved.path);
-    if (!assetUrl) {
-      recordUnresolvedAsset(diagnostics, 'css', rawUrl, resolved.path, cssPath);
-      return match;
-    }
-    if (diagnostics) diagnostics.cssRewriteCount += 1;
-    return `url(${quote || ''}${assetUrl}${resolved.suffix}${quote || ''})`;
-  });
-}
 
-function rewriteElementUrlAttribute(element, attribute, baseDir, assetUrls, diagnostics, ownerPath, options = {}) {
-  const rawUrl = element.getAttribute(attribute);
-  const resolved = resolvePackageUrl(rawUrl, baseDir);
-  if (!resolved) return false;
 
-  const assetUrl = assetUrls.get(resolved.path);
-  if (!assetUrl) {
-    recordUnresolvedAsset(diagnostics, options.kind || 'html', rawUrl, resolved.path, ownerPath);
-    if (options.blockUnresolved) {
-      element.removeAttribute(attribute);
-      element.setAttribute('data-xeneon-blocked-src', String(rawUrl || ''));
-    }
-    return false;
-  }
 
-  element.setAttribute(attribute, `${assetUrl}${resolved.suffix}`);
-  if (diagnostics) diagnostics.htmlRewriteCount += 1;
-  return true;
-}
 
-function rewriteHtmlAssetUrls(htmlText, layoutPath, assetUrls, diagnostics = null, cssTextByPath = new Map()) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(htmlText, 'text/html');
-  const baseDir = dirname(layoutPath);
-  const urlAttributes = [
-    ['script[src]', 'src'],
-    ['img[src]', 'src'],
-    ['source[src]', 'src'],
-    ['video[src]', 'src'],
-    ['audio[src]', 'src'],
-    ['image[href]', 'href'],
-    ['track[src]', 'src'],
-    ['embed[src]', 'src'],
-    ['object[data]', 'data']
-  ];
 
-  for (const element of doc.querySelectorAll('link[href]')) {
-    const resolved = resolvePackageUrl(element.getAttribute('href'), baseDir);
-    const rel = String(element.getAttribute('rel') || '').toLowerCase().split(/\s+/);
-    if (!resolved) continue;
-
-    if (rel.includes('stylesheet') && cssTextByPath.has(resolved.path)) {
-      const style = doc.createElement('style');
-      style.setAttribute('data-xeneon-inline-href', element.getAttribute('href') || resolved.path);
-      style.textContent = cssTextByPath.get(resolved.path) || '';
-      element.replaceWith(style);
-      if (diagnostics) {
-        diagnostics.htmlRewriteCount += 1;
-        diagnostics.inlinedStylesheetCount += 1;
-      }
-      continue;
-    }
-
-    rewriteElementUrlAttribute(element, 'href', baseDir, assetUrls, diagnostics, layoutPath);
-  }
-
-  for (const [selector, attribute] of urlAttributes) {
-    for (const element of doc.querySelectorAll(selector)) {
-      rewriteElementUrlAttribute(element, attribute, baseDir, assetUrls, diagnostics, layoutPath);
-    }
-  }
-
-  for (const element of doc.querySelectorAll('use[href]')) {
-    rewriteElementUrlAttribute(element, 'href', baseDir, assetUrls, diagnostics, layoutPath, { kind: 'svg-use' });
-  }
-
-  for (const element of doc.querySelectorAll('use[xlink\\:href]')) {
-    rewriteElementUrlAttribute(element, 'xlink:href', baseDir, assetUrls, diagnostics, layoutPath, { kind: 'svg-use' });
-  }
-
-  for (const element of doc.querySelectorAll('iframe[src]')) {
-    rewriteElementUrlAttribute(element, 'src', baseDir, assetUrls, diagnostics, layoutPath, {
-      kind: 'iframe',
-      blockUnresolved: true
-    });
-    const src = element.getAttribute('src') || '';
-    if (src.startsWith('blob:')) {
-      element.setAttribute('sandbox', 'allow-scripts');
-    }
-  }
-
-  for (const element of doc.querySelectorAll('[srcset]')) {
-    const rewritten = String(element.getAttribute('srcset') || '').split(',').map((candidate) => {
-      const parts = candidate.trim().split(/\s+/);
-      const resolved = resolvePackageUrl(parts[0], baseDir);
-      if (!resolved) return candidate;
-      const assetUrl = assetUrls.get(resolved.path);
-      if (!assetUrl) {
-        recordUnresolvedAsset(diagnostics, 'srcset', parts[0], resolved.path, layoutPath);
-        return candidate;
-      }
-      if (diagnostics) diagnostics.htmlRewriteCount += 1;
-      return [`${assetUrl}${resolved.suffix}`, ...parts.slice(1)].join(' ');
-    }).join(', ');
-    element.setAttribute('srcset', rewritten);
-  }
-
-  for (const element of doc.querySelectorAll('[style]')) {
-    element.setAttribute('style', rewriteCssUrls(element.getAttribute('style') || '', layoutPath, assetUrls, diagnostics));
-  }
-
-  for (const style of doc.querySelectorAll('style')) {
-    style.textContent = rewriteCssUrls(style.textContent || '', layoutPath, assetUrls, diagnostics);
-  }
-
-  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
-}
-
-function detectJsStaticAssetReferences(assetUrls) {
-  const decoder = new TextDecoder();
-  const references = [];
-  const stringPattern = /(['"`])((?:\.{1,2}\/|\/)?[A-Za-z0-9._~!$&'()*+,;=:@/-]+\.(?:png|jpe?g|gif|webp|svg|ico|css|json|mp3|wav|ogg|mp4|webm|woff2?|ttf|otf)(?:[?#][^'"`]*)?)\1/gi;
-
-  for (const file of currentArchiveFiles) {
-    if (!file.contentType.includes('javascript')) continue;
-    const jsText = decoder.decode(file.bytes);
-    const baseDir = dirname(file.path);
-    let match;
-    while ((match = stringPattern.exec(jsText)) && references.length < 10) {
-      const resolved = resolvePackageUrl(match[2], baseDir);
-      if (resolved && assetUrls.has(resolved.path)) {
-        references.push({ owner: file.path, url: match[2], path: resolved.path });
-      }
-    }
-  }
-
-  return references;
-}
-
-function buildPreviewSrcdoc(layoutPath) {
-  const runtimePayload = getLayoutRuntimePayload();
-  const assetUrls = new Map();
-  const objectUrls = [];
-  const decoder = new TextDecoder();
-  const diagnostics = createAssetRewriteDiagnostics();
-  const cssFiles = [];
-  const cssTextByPath = new Map();
-
-  for (const file of currentArchiveFiles) {
-    if (file.contentType.startsWith('text/css')) {
-      cssFiles.push(file);
-      continue;
-    }
-    assetUrls.set(file.path, createPreviewObjectUrl([file.bytes], file.contentType, objectUrls));
-  }
-
-  for (const file of cssFiles) {
-    const cssText = currentTextEntries.get(file.path) || decoder.decode(file.bytes);
-    const rewrittenCss = rewriteCssUrls(cssText, file.path, assetUrls, diagnostics);
-    cssTextByPath.set(file.path, rewrittenCss);
-    assetUrls.set(file.path, createPreviewObjectUrl([rewrittenCss], file.contentType, objectUrls));
-  }
-
-  const layoutHtml = currentTextEntries.get(layoutPath);
-  if (typeof layoutHtml !== 'string') {
-    throw new Error('Widget layout file was not available for sandbox rendering.');
-  }
-
-  const injectedHtml = injectPreviewRuntime(layoutHtml, runtimePayload);
-  const srcdoc = rewriteHtmlAssetUrls(injectedHtml, layoutPath, assetUrls, diagnostics, cssTextByPath);
-  widgetAssetWarnings = diagnostics.unresolved.slice(0, 10);
-  renderAssetWarnings();
-  logPreviewTelemetry('asset map built', { count: assetUrls.size });
-  logPreviewTelemetry('HTML asset rewrites', { count: diagnostics.htmlRewriteCount });
-  logPreviewTelemetry('CSS asset rewrites', { count: diagnostics.cssRewriteCount });
-  logPreviewTelemetry('inlined package stylesheets', { count: diagnostics.inlinedStylesheetCount });
-  if (diagnostics.unresolved.length) {
-    logPreviewTelemetry('unresolved local asset references', diagnostics.unresolved.slice(0, 10));
-  }
-  const jsStaticReferences = detectJsStaticAssetReferences(assetUrls);
-  if (jsStaticReferences.length) {
-    logPreviewTelemetry('JS static asset path rewriting is not performed', jsStaticReferences);
-  }
-  return { srcdoc, objectUrls };
-}
-
-function setWidgetFrameSource(layoutUrl, srcdoc = '') {
-  widgetFrame.src = srcdoc ? 'about:blank' : layoutUrl;
-  widgetFrame.srcdoc = srcdoc;
-  widgetFrame.dataset.src = layoutUrl;
+function setWidgetFrameSource(frameUrl) {
+  widgetFrame.removeAttribute('srcdoc');
+  widgetFrame.src = frameUrl;
+  widgetFrame.dataset.src = frameUrl.split('?')[0];
 }
 
 function clearWidgetFrameToBlank() {
@@ -1544,16 +1356,9 @@ async function updateFrame(forceReload = false) {
     if (updateId !== frameUpdateSequence) {
       return;
     }
-    const previewDocument = buildPreviewSrcdoc(target.layoutPath);
-    if (updateId !== frameUpdateSequence) {
-      const revokedCount = revokeObjectUrlList(previewDocument.objectUrls);
-      if (revokedCount) logPreviewTelemetry('blob URLs revoked', { count: revokedCount });
-      return;
-    }
-    revokePreviewObjectUrls();
-    currentPreviewObjectUrls = previewDocument.objectUrls;
-    const srcdoc = previewDocument.srcdoc;
-    setWidgetFrameSource(nextPath, srcdoc);
+    // Load the widget from its own URL: scripts, images, fonts and fetch() of package files
+    // resolve like they do in iCUE. A blob:/srcdoc copy in an opaque sandbox no longer runs scripts.
+    setWidgetFrameSource(`${nextPath}?r=${++widgetFrameLoadCount}`);
     logPreviewTelemetry('iframe src set', { layoutUrl: nextPath });
   }
 

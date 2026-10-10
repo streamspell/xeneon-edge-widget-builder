@@ -2,7 +2,9 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 const MAX_SESSIONS = 12;
 const WIDGET_CACHE_NAME = 'xeneon-widget-preview-v1';
 const SESSION_INDEX_URL = '/__widget_meta__/index.json';
-const WIDGET_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+// Outer bound for widget files. The page's injected meta CSP narrows connect-src further
+// (loopback only while Network Preview is on).
+const WIDGET_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' data: blob:; font-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; object-src 'self' blob:; frame-src 'self' blob:; worker-src 'self' blob:; base-uri 'self'; form-action 'none'";
 
 function logServiceWorkerTelemetry(message, ...details) {
   console.log('[XENEON sw]', message, ...details);

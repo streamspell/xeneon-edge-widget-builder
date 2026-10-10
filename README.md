@@ -38,7 +38,9 @@ Validation results are shown in the UI with pass/warn/fail status.
 ## Notes
 
 - Best on Chrome/Edge/Safari with Service Worker support.
-- External network access is blocked by default in local preview for safety.
+- Widgets load from their own `/__widget__/<session>/` URL (served by the Service Worker), so scripts, images, fonts and `fetch()` of package files behave like they do in iCUE. Each widget gets a stable `uniqueId`.
+- The preview frame is same-origin with the builder (`allow-scripts allow-same-origin`). Only preview widgets you trust: a widget can read this site's local data.
+- External network access is blocked by default. Network Preview proxies external GET requests and also allows loopback (`127.0.0.1` / `localhost`) for companion apps.
 - Widgets that depend on remote feeds/APIs (for example Readit or RSS Feed Reader) may require the optional local proxy flow and still depend on remote CORS/content behavior.
 
 ## Hosted network preview

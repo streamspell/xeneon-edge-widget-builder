@@ -329,9 +329,33 @@ function validateManifestFallback(manifest, filesSet) {
   return { errors, warnings };
 }
 
-function runProcess(cmd, args, { timeoutMs, cwd } = {}) {
+const IS_WINDOWS = process.platform === 'win32';
+// Windows installs Python as python.exe; python3.exe is usually only the Store stub.
+const PYTHON = IS_WINDOWS ? 'python' : 'python3';
+
+async function isIcueWidgetCliAvailable() {
+  try {
+    const probe = IS_WINDOWS
+      ? await runProcess('where', ['icuewidget'], { timeoutMs: 4000, shell: true })
+      : await runProcess('sh', ['-lc', 'command -v icuewidget'], { timeoutMs: 2000 });
+    return probe.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+function quoteForCmd(arg) {
+  return /[\s"&|<>^]/.test(arg) ? `"${String(arg).replace(/"/g, '""')}"` : String(arg);
+}
+
+function runProcess(cmd, args, { timeoutMs, cwd, shell = false } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    // On Windows, npm CLIs such as icuewidget are .cmd shims that only start through a shell.
+    const useShell = IS_WINDOWS && shell;
+    const command = useShell ? [cmd, ...args].map(quoteForCmd).join(' ') : cmd;
+    const child = useShell
+      ? spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let done = false;
@@ -387,7 +411,7 @@ async function runValidation(fileName, zipBuffer) {
     await fsp.writeFile(zipPath, zipBuffer);
 
     const pyExtract = await withTimeout(
-      runProcess('python3', [
+      runProcess(PYTHON, [
         '-c',
         [
           'import os,sys,re,zipfile',
@@ -448,7 +472,7 @@ async function runValidation(fileName, zipBuffer) {
     }
 
     const listProc = await withTimeout(
-      runProcess('python3', ['-c', [
+      runProcess(PYTHON, ['-c', [
         'import os,sys,json',
         'root=sys.argv[1]',
         'out=[]',
@@ -481,10 +505,10 @@ async function runValidation(fileName, zipBuffer) {
     }
 
     let cliResult = null;
-    const hasCli = (await runProcess('sh', ['-lc', 'command -v icuewidget'], { timeoutMs: 2000 })).code === 0;
+    const hasCli = await isIcueWidgetCliAvailable();
     if (hasCli) {
       const cli = await withTimeout(
-        runProcess('icuewidget', ['validate', extractDir], { timeoutMs: VALIDATION_TIMEOUT_MS }),
+        runProcess('icuewidget', ['validate', extractDir], { timeoutMs: VALIDATION_TIMEOUT_MS, shell: true }),
         VALIDATION_TIMEOUT_MS,
         'icuewidget validate'
       );
