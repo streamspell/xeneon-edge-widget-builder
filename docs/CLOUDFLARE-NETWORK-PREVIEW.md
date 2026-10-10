@@ -131,9 +131,9 @@ If a future widget requires `text/html`, document exactly why and add it explici
 
 ## Why network preview is opt-in
 
-The iframe runs under a strict Content Security Policy (`connect-src 'none'`). Without network preview enabled, widgets cannot make any external requests. This is intentional — it prevents untrusted widget code from beaconing, exfiltrating data, or loading remote scripts.
+The widget runs same-origin with the builder so its scripts and package files behave like they do in iCUE. Its Content Security Policy limits `connect-src` to the widget's own files unless network preview is on, and blocks remote scripts. Because the frame is same-origin, this is not an isolation boundary: only preview widgets you trust.
 
-The network preview toggle is session-only and off by default. It must be explicitly enabled each session. When enabled, only GET requests to http/https URLs are proxied through `/api/proxy`. Requests to localhost, private ranges, and metadata services remain blocked at the proxy level.
+The network preview toggle is session-only and off by default. It must be explicitly enabled each session. When enabled, only GET requests to http/https URLs are proxied through `/api/proxy`. Requests to localhost, private ranges, and metadata services remain blocked at the proxy level. Separately, network preview lets the widget call loopback (`127.0.0.1` / `localhost`) directly, so it can reach a companion app running on your PC.
 
 ---
 

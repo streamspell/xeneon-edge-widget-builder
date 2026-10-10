@@ -116,8 +116,7 @@ let currentArchiveFiles = [];
 let currentTextEntries = new Map();
 let frameUpdateSequence = 0;
 let registeredWidgetSessionId = null;
-let currentPreviewObjectUrls = [];
-let widgetFrameLoadCount = 0;
+
 let activeUploadToken = 0;
 
 const SERVICE_WORKER_RELOAD_KEY = 'xeneon-widget-preview-sw-reload-once';
@@ -131,7 +130,8 @@ const BUILDER_APP_SHELL_MARKERS = [
 ];
 // Package files are served from the widget's own /__widget__/<session>/ path, so they load as 'self'.
 // Network stays closed unless Network Preview is on; then loopback (companion apps) is reachable too.
-const PREVIEW_CSP_BASE = "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; object-src 'self' blob:; frame-src 'self' blob:; worker-src 'self' blob:; base-uri 'self'; form-action 'none'";
+// 'unsafe-eval': widgets read iCUE globals with Function('return name'), as Corsair's examples do.
+const PREVIEW_CSP_BASE = "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; object-src 'none'; frame-src 'self' blob:; worker-src 'self' blob:; base-uri 'self'; form-action 'none'";
 const PREVIEW_LOOPBACK_SOURCES = 'http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*';
 
 function createEmptyValidationState(summary = 'No validation run yet.') {
@@ -459,8 +459,11 @@ function serializeForInlineScript(value) {
 }
 
 function buildPreviewSecurityMeta(proxyEnabled) {
-  const connect = proxyEnabled ? `connect-src 'self' ${PREVIEW_LOOPBACK_SOURCES}` : "connect-src 'self'";
-  return `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP_BASE}; ${connect}">`;
+  // Network Preview also lets remote images (store covers, avatars) display.
+  const network = proxyEnabled
+    ? `connect-src 'self' ${PREVIEW_LOOPBACK_SOURCES}; img-src 'self' blob: data: https:`
+    : "connect-src 'self'; img-src 'self' blob: data:";
+  return `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP_BASE}; ${network}">`;
 }
 
 function buildPreviewRuntimeBridge(runtimePayload) {
@@ -484,7 +487,7 @@ tell({type:'ICUE_PREVIEW_BRIDGE_READY'});
 })();
 var initial=${payload};
 if(initial.uniqueId&&typeof window.uniqueId==='undefined'){try{window.uniqueId=initial.uniqueId;}catch(_){}}
-var LOOPBACK=/^(127\.0\.0\.1|localhost|\[::1\])$/i;
+var LOOPBACK=/^(127\\.0\\.0\\.1|localhost)$/i;
 var shouldProxy=function(u){try{var x=new URL(u,location.href);return /^https?:$/.test(x.protocol)&&x.origin!==location.origin&&!LOOPBACK.test(x.hostname);}catch(_){return false;}};
 var clone=function(v){return JSON.parse(JSON.stringify(v||{}));};
 var DIRECT_HOOKS=['onIcueInitialized','onIcueDataUpdated'];
@@ -753,7 +756,6 @@ function formatDateTime(timestamp) {
 function resetCurrentWidgetState() {
   currentSessionId = null;
   registeredWidgetSessionId = null;
-  revokePreviewObjectUrls();
   loadedManifest = null;
   layouts = [];
   activeLayoutIndex = 0;
@@ -855,29 +857,6 @@ function isSafeArchivePath(rawPath) {
 function normalizePath(filePath) {
   if (!isSafeArchivePath(filePath)) return null;
   return decodeURIComponent(filePath).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/');
-}
-
-function splitUrlParts(rawUrl) {
-  const value = String(rawUrl || '').trim();
-  const match = value.match(/^([^?#]*)([?#][\s\S]*)?$/);
-  return {
-    path: match?.[1] || value,
-    suffix: match?.[2] || ''
-  };
-}
-
-function isPackageLocalUrl(rawUrl) {
-  const value = String(rawUrl || '').trim();
-  if (!value || value.startsWith('#') || value.startsWith('//')) return false;
-  if (/^(?:[a-z][a-z0-9+.-]*:)/i.test(value)) return false;
-  return true;
-}
-
-function resolvePackageUrl(rawUrl, baseDir = '') {
-  if (!isPackageLocalUrl(rawUrl)) return null;
-  const { path, suffix } = splitUrlParts(rawUrl);
-  const resolved = resolvePath(baseDir, path);
-  return resolved ? { path: resolved, suffix } : null;
 }
 
 function dirname(filePath) {
@@ -1248,13 +1227,6 @@ async function runAutoValidation(fileName, buffer) {
   return createValidationStateFromResult(result);
 }
 
-function getLayoutUrl() {
-  const target = getCurrentLayoutTarget();
-  if (!target) return 'about:blank';
-  const baseUrl = `/__widget__/${target.sessionId}/${target.layoutPath}`;
-  return previewReloadNonce ? `${baseUrl}?reload=${previewReloadNonce}` : baseUrl;
-}
-
 function getActiveLayoutPath() {
   return layouts[activeLayoutIndex]?.path || '';
 }
@@ -1270,40 +1242,13 @@ function getCurrentLayoutTarget() {
   };
 }
 
-function revokePreviewObjectUrls() {
-  const revokedCount = revokeObjectUrlList(currentPreviewObjectUrls);
-  currentPreviewObjectUrls = [];
-  if (revokedCount) {
-    logPreviewTelemetry('blob URLs revoked', { count: revokedCount });
-  }
-}
-
-function revokeObjectUrlList(urls) {
-  let revokedCount = 0;
-  for (const url of urls || []) {
-    URL.revokeObjectURL(url);
-    revokedCount += 1;
-  }
-  return revokedCount;
-}
-
-
-
-
-
-
-
-
-
-
 function setWidgetFrameSource(frameUrl) {
   widgetFrame.removeAttribute('srcdoc');
   widgetFrame.src = frameUrl;
-  widgetFrame.dataset.src = frameUrl.split('?')[0];
+  widgetFrame.dataset.src = frameUrl;
 }
 
 function clearWidgetFrameToBlank() {
-  revokePreviewObjectUrls();
   setWidgetFrameSource('about:blank');
 }
 
@@ -1358,7 +1303,7 @@ async function updateFrame(forceReload = false) {
     }
     // Load the widget from its own URL: scripts, images, fonts and fetch() of package files
     // resolve like they do in iCUE. A blob:/srcdoc copy in an opaque sandbox no longer runs scripts.
-    setWidgetFrameSource(`${nextPath}?r=${++widgetFrameLoadCount}`);
+    setWidgetFrameSource(nextPath);
     logPreviewTelemetry('iframe src set', { layoutUrl: nextPath });
   }
 
@@ -2406,7 +2351,7 @@ viewportSelect.addEventListener('change', () => {
 reloadPreviewButton.addEventListener('click', () => {
   if (!currentSessionId) return;
   previewReloadNonce = Date.now();
-  void updateFrame(true).then(() => {
+  void refreshWidgetSessionHtml().then(() => updateFrame(true)).then(() => {
     setStatusMessage('Preview reloaded.');
   }).catch((error) => {
     showPreviewRoutingFailure(error.message || String(error));

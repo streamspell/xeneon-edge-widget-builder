@@ -1,10 +1,10 @@
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const MAX_SESSIONS = 12;
-const WIDGET_CACHE_NAME = 'xeneon-widget-preview-v1';
+const WIDGET_CACHE_NAME = 'xeneon-widget-preview-v2';
 const SESSION_INDEX_URL = '/__widget_meta__/index.json';
 // Outer bound for widget files. The page's injected meta CSP narrows connect-src further
 // (loopback only while Network Preview is on).
-const WIDGET_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' data: blob:; font-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; object-src 'self' blob:; frame-src 'self' blob:; worker-src 'self' blob:; base-uri 'self'; form-action 'none'";
+const WIDGET_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' data: blob: https:; font-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; object-src 'none'; frame-src 'self' blob:; worker-src 'self' blob:; base-uri 'self'; form-action 'none'";
 
 function logServiceWorkerTelemetry(message, ...details) {
   console.log('[XENEON sw]', message, ...details);
@@ -80,8 +80,9 @@ async function pruneSessions(cache, index) {
     .sort((a, b) => a[1].createdAt - b[1].createdAt);
 
   const expiredIds = new Set();
+  const newestId = sessions.length ? sessions[sessions.length - 1][0] : null;
   for (const [sessionId, sessionMeta] of sessions) {
-    if (now - sessionMeta.createdAt > SESSION_TTL_MS) {
+    if (sessionId !== newestId && now - sessionMeta.createdAt > SESSION_TTL_MS) {
       expiredIds.add(sessionId);
     }
   }
@@ -191,6 +192,13 @@ self.addEventListener('message', async (event) => {
   })());
 });
 
+async function reportMissingAsset(sessionId, path) {
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of windows) {
+    client.postMessage({ type: 'WIDGET_ASSET_WARNING', sessionId, path, reason: 'missing' });
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   const marker = '/__widget__/';
@@ -217,6 +225,7 @@ self.addEventListener('fetch', (event) => {
     await pruneSessions(cache, await readSessionIndex(cache));
     const response = await cache.match(sessionRequest(sessionId, safePath));
     if (response) return withCacheHeader(response, 'hit');
+    void reportMissingAsset(sessionId, safePath);
     return textResponse(404, 'Widget asset not available. The Service Worker must serve /__widget__ assets from Cache Storage.', {
       'X-Xeneon-Widget-Cache': 'miss'
     });
