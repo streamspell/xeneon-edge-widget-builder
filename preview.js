@@ -2350,8 +2350,10 @@ viewportSelect.addEventListener('change', () => {
 
 reloadPreviewButton.addEventListener('click', () => {
   if (!currentSessionId) return;
-  previewReloadNonce = Date.now();
-  void refreshWidgetSessionHtml().then(() => updateFrame(true)).then(() => {
+  void refreshWidgetSessionHtml().then(() => {
+    previewReloadNonce = Date.now();
+    return updateFrame(true);
+  }).then(() => {
     setStatusMessage('Preview reloaded.');
   }).catch((error) => {
     showPreviewRoutingFailure(error.message || String(error));
